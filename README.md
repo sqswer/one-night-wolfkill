@@ -3,82 +3,44 @@
 基于《一夜狼人杀指南》全部角色与桌游流程，打造的一款**零依赖、可联机**的网页版 App。
 创建房间 → 分享邀请 → 3-7 人组队 → AI 语音播报员按「黄昏 + 夜晚」顺序引导行动 → 白天语音/文字发言 → 投票 → 准确展示胜负。
 
-## 快速开始
+## 部署到 Koyeb（免费公网）
 
-```bash
-cd 一夜狼人杀在线网页版
-node server.js
-# 浏览器打开 http://localhost:3000
-```
+本游戏是 **Node.js 后端 + 浏览器前端**：后端负责房间状态与实时同步，必须运行在一台"一直开机"的机器上。
+Koyeb 提供**免费实例**（512MB 内存 / 0.1 vCPU / 2GB SSD），无需信用卡，适合个人聚会长期挂着。
 
-- 房主点「创建房间」，把**房间号 / 邀请链接**发给好友（手机同 Wi-Fi 访问 `http://<电脑局域网IP>:3000`）。
-- 好友点「加入房间」输入房间号即可。
-- 房主选阵容 →「开始游戏」。
+> 本项目已内置 `Dockerfile` 和 `koyeb.yaml`，开箱即用。
 
-> 无需 `npm install`，无需任何 API 密钥、无需联网即可游玩（语音为浏览器本地能力）。
+### 第一步：注册 Koyeb 免费账号
 
-## 部署到公网（户外手机也能玩，不依赖你的电脑）
+1. 打开 [app.koyeb.com](https://app.koyeb.com)，点 **Sign up**。
+2. 推荐直接点 **「Continue with GitHub」**——注册的同时就自动关联了 GitHub，跳到第二步即可。
+3. 用邮箱 / Google / passkey 注册也行，同样**不要求填信用卡**。
+4. 注册完即为免费档，无需任何付费操作。
 
-本游戏是 **Node.js 后端 + 浏览器前端**：后端负责房间状态与实时同步，必须运行在某台"一直开机"的机器上。
-想让朋友在户外用手机玩，**不能只靠你本机 localhost**——要把这个 Node 服务部署到一台云主机（免费即可），
-前端是纯网页，谁都能用浏览器打开公网链接加入。
+> 如果注册时没关联 GitHub，后续可在 **右上角头像 → User settings → Link to GitHub** 补关联。
 
-> ⚠️ 关于"部署工具"：本项目的 CloudStudio 部署能力**仅支持纯静态站点**（HTML/CSS/JS），
-> 而本游戏需要 Node 后端，因此 CloudStudio 静态部署托管不了它。请按下方任选一种云主机方案。
+### 第二步：创建 Web Service
 
-### 方案 A：Koyeb（免费额度，推荐）
-> Koyeb 提供免费实例额度，注册并关联 GitHub 即可使用，适合个人聚会长期挂着。
+1. 登录 [app.koyeb.com](https://app.koyeb.com)，在控制台页面点 **「Create Web Service」**。
+2. **Source** 选 **GitHub** → 授权 Koyeb 访问你的仓库（首次会跳转 GitHub 点 Authorize）。
+3. **Repository** 选你存放本项目的仓库和分支。
+4. **Builder** 选 **Dockerfile**（Koyeb 通常会自动检测到根目录的 Dockerfile）。
+5. **实例规格**选 **Nano**（免费）。区域默认 Frankfurt 或 Washington D.C. 即可。
+6. 点 **「Deploy」**，等待构建完成。
 
-### 先搞定：申请 Koyeb 免费账号 & 关联 GitHub
+> 本项目根目录已有 `Dockerfile`（`node:20-alpine`，零依赖）和 `koyeb.yaml`（指定端口 3000、健康检查 `/api/presets`），无需额外配置。
 
-Koyeb 的免费档叫 **Hobby**，特点是：**无需信用卡、永久有效**（1 个 Web 服务：512MB 内存 / 0.1 vCPU / 2GB 存储），闲置自动缩容到 0，不花钱。
+### 第三步：开始游戏
 
-**1）申请免费账号（30 秒）**
-- 打开注册页：[app.koyeb.com](https://app.koyeb.com)（或 koyeb.com 点 Sign up）。
-- 选一种方式注册：**Continue with GitHub** / **Continue with Google** / **passkey** / **邮箱+密码**。
-  - 推荐直接点 **「Continue with GitHub」**——注册的同时就自动把 GitHub 关联上了，跳到第 3 步即可。
-  - 用邮箱注册也行，同样**不要求填信用卡**。
-- 注册完默认就是 Hobby 免费档，无需任何付费操作。
+部署完成后，你会获得一个 `https://xxx.koyeb.app` 的公网地址。手机浏览器打开即可创建 / 加入房间。
 
-**2）关联 GitHub（若第 1 步没用 GitHub 注册）**
-- 进入控制台 → 右上角头像 → **User settings**（账户设置）→ 找到 **Link to GitHub** 一项，点它。
-- 页面会跳转到 GitHub，提示「Authorize Koyeb」——点 **Authorize** 授权即可。
-- 或在后续「创建 App」流程里，Koyeb 也会弹出 GitHub 授权窗口，同样点 Authorize 完成关联。
-- 关联后，Koyeb 就能读取你的仓库、并在每次 `git push` 时自动重新部署。
-
-**3）一键部署（见下方）**
-
-**一键部署（config-as-code）**
-1. 把本项目推到你的 GitHub 仓库（仓库需含根目录 `Dockerfile` 与 `koyeb.yaml`）。
-2. 在 [app.koyeb.com](https://app.koyeb.com) 关联 GitHub → **Create App** → 选「从仓库的 `koyeb.yaml` 部署」。
-   - 或手动：Create App → 选 GitHub 仓库 → 构建方式选 **Dockerfile** → 端口填 `3000`。
-   - 本项目已内置 `koyeb.yaml`，指定了镜像、端口、环境变量（`PORT=3000`）与健康检查（`/api/presets`）。
-3. 部署完成后获得 `https://xxx.koyeb.app` 公网地址，手机浏览器打开即可创建/加入房间。
-4. 免费实例空闲会缩容到 0，下次访问冷启动几秒属正常。
-
-**本地用 Koyeb CLI 预览（可选）**
-```bash
-# 安装 CLI 后
-koyeb app create --name oww --from-file koyeb.yaml
-```
-
-### 方案 B：Render（免费额度，需信用卡验证）
-- 同上，GitHub 仓库 → New Web Service → 选本仓库 → Build 用 Docker → 端口 `3000`。
-- 免费实例会休眠，首次访问需冷启动几秒（属正常）。
-
-### 方案 C：你有服务器 / VPS / 树莓派
-```bash
-# 任意装了 Node 18+ 的机器
-git clone <你的仓库> && cd 一夜狼人杀在线网页版
-PORT=3000 node server.js
-# 用 nginx / caddy 反代 3000 端口并配域名 + HTTPS 即可
-```
-Docker 方式：`docker build -t oww . && docker run -d -p 3000:3000 oww`
+免费实例闲置时会自动休眠，下次访问冷启动几秒属正常。
 
 ### 要点
-- 服务器必须监听 `0.0.0.0` 且读 `process.env.PORT`（本项目已满足）。
+
 - 房间数据存内存，**重启即清空**，适合一局制聚会；如需持久化可自行接数据库。
 - 手机端用 Chrome / Edge / Safari 打开公网链接，体验最佳（语音为浏览器内置能力）。
+- 后续代码更新只需 `git push`，Koyeb 会自动重新构建部署。
 
 ## 已实现功能
 
