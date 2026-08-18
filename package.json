@@ -1,0 +1,13 @@
+{
+  "name": "one-night-werewolf-online",
+  "version": "1.0.0",
+  "description": "一夜狼人杀 · 在线版（零依赖 Node.js + 浏览器内置语音）",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "dependencies": {}
+}

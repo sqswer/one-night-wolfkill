@@ -1,0 +1,32 @@
+# 一夜狼人杀在线版 · Koyeb 部署配置（config-as-code）
+#
+# 用法：
+#   方式一（控制台）：GitHub 关联本仓库 → Create App → 选「使用 koyeb.yaml」或「Dockerfile」→ 端口 3000
+#   方式二（CLI）：   安装 Koyeb CLI 后执行 `koyeb app create --name oww --from-file koyeb.yaml`
+#
+# 说明：
+#   - 使用仓库根目录的 Dockerfile 构建镜像（node:20-alpine，零依赖）。
+#   - 服务监听 PORT（已设为 3000），Koyeb 免费实例即可承载。
+#   - min_instances: 0 表示空闲时缩容到 0（免费额度），下次访问会冷启动几秒，属正常。
+
+app: one-night-werewolf
+
+services:
+  - name: web
+    type: web
+    docker:
+      build:
+        dockerfile: Dockerfile
+    ports:
+      - port: 3000
+        protocol: http
+    env:
+      - name: PORT
+        value: "3000"
+    scaling:
+      min_instances: 0
+      max_instances: 1
+    health_check:
+      port: 3000
+      path: /api/presets
+      initial_delay: 10
