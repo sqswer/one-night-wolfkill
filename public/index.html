@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no" />
+<title>一夜狼人杀 · 在线</title>
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<div id="app">
+
+  <!-- ============ 首页 ============ -->
+  <section id="screen-home" class="screen active">
+    <div class="hero">
+      <div class="moon" aria-hidden="true"></div>
+      <h1 class="hero-title">一夜狼人杀</h1>
+      <p class="hero-sub">在线联机 · AI 语音播报 · 3–7 人</p>
+    </div>
+    <div class="card">
+      <label class="field-label" for="home-name">你的昵称</label>
+      <input id="home-name" placeholder="输入昵称" maxlength="16" />
+      <button id="btn-create" class="btn btn-primary btn-block">创建房间</button>
+      <div class="divider"><span>或输入房间号加入</span></div>
+      <input id="home-code" placeholder="6 位房间号" maxlength="6" inputmode="numeric" />
+      <button id="btn-join" class="btn btn-ghost btn-block">加入房间</button>
+    </div>
+    <p class="footnote">语音由浏览器内置能力驱动，建议使用 Chrome / Edge / Safari。</p>
+    <button id="btn-codex-home" class="btn btn-ghost btn-block codex-open">📖 查看全部角色图鉴</button>
+  </section>
+
+  <!-- ============ 大厅 ============ -->
+  <section id="screen-lobby" class="screen">
+    <header class="topbar">
+      <div class="room-id">
+        <span class="room-id-label">房间号</span>
+        <span class="room-id-value" id="lobby-code">------</span>
+      </div>
+      <button id="btn-copy" class="btn btn-ghost btn-sm">复制邀请</button>
+    </header>
+
+    <div class="card">
+      <div class="card-head">
+        <h3>玩家</h3>
+        <span class="muted" id="lobby-count">0 / 7</span>
+      </div>
+      <ul id="lobby-players" class="player-list"></ul>
+    </div>
+
+    <div class="card host-only" id="host-only">
+      <div class="card-head"><h3>选择阵容</h3></div>
+      <div class="select-wrap">
+        <select id="preset-select"></select>
+      </div>
+      <p class="preset-desc" id="preset-desc"></p>
+    </div>
+
+    <div class="actions">
+      <button id="btn-ready" class="btn btn-ghost btn-block">准备 / 取消</button>
+      <button id="btn-start" class="btn btn-primary btn-block">开始游戏</button>
+    </div>
+    <button id="btn-codex-lobby" class="btn btn-ghost btn-block codex-open">📖 查看全部角色图鉴</button>
+    <p class="footnote" id="lobby-tip">把房间号或邀请链接发给好友，他们打开即可加入。</p>
+  </section>
+
+  <!-- ============ 游戏 ============ -->
+  <section id="screen-game" class="screen">
+    <header class="topbar">
+      <div class="phase" id="phase-pill"><span class="dot"></span><span id="phase-text">准备中</span></div>
+      <div class="topbar-actions">
+        <span class="conn" id="conn-dot" title="连接状态"></span>
+        <button id="btn-tts" class="btn btn-ghost btn-icon" title="语音播报开关">🔊</button>
+      </div>
+    </header>
+
+    <!-- 夜晚 / 黄昏 进度（AI 引导） -->
+    <div class="stepper hidden" id="stepper">
+      <div class="stepper-label" id="stepper-label"></div>
+      <div class="stepper-bar"><div class="stepper-fill" id="stepper-fill"></div></div>
+    </div>
+
+    <!-- 身份卡 -->
+    <div id="role-card" class="role-card hidden">
+      <div class="role-team" id="role-team"></div>
+      <div class="role-name" id="role-name"></div>
+      <p class="role-desc" id="role-desc"></p>
+      <div class="role-seen" id="role-seen"></div>
+      <div class="role-mark" id="role-mark"></div>
+    </div>
+
+    <!-- AI 播报员 -->
+    <div class="announcer" id="announcer">
+      <div class="announcer-avatar">📢</div>
+      <div class="announcer-body">
+        <div class="announcer-name">AI 播报员</div>
+        <div class="announcer-text" id="ann-text">等待开始…</div>
+      </div>
+    </div>
+
+    <!-- 行动提示 -->
+    <div id="action-box" class="panel action-box hidden"></div>
+
+    <!-- 本局记录 -->
+    <details class="log-fold">
+      <summary>本局记录</summary>
+      <div class="log" id="log"></div>
+    </details>
+
+    <!-- 白天发言 -->
+    <div id="day-box" class="panel day-box hidden">
+      <div class="card-head"><h3>白天发言</h3></div>
+      <div class="speech-log" id="speech-log"></div>
+      <div class="speech-input">
+        <button id="btn-mic" class="btn btn-icon mic" title="语音输入">🎤</button>
+        <input id="speech-text" placeholder="说点什么，或点麦克风语音输入…" />
+        <button id="btn-send-speech" class="btn btn-primary">发送</button>
+      </div>
+      <div id="mic-status" class="mic-status"></div>
+    </div>
+
+    <!-- 投票 -->
+    <div id="vote-box" class="panel vote-box hidden">
+      <div class="card-head"><h3>投票放逐</h3><span class="muted" id="vote-status"></span></div>
+      <div id="vote-list" class="vote-list"></div>
+    </div>
+
+    <!-- 猎人开枪 -->
+    <div id="hunter-box" class="panel hunter-box hidden">
+      <div class="card-head"><h3>猎人开枪</h3></div>
+      <p class="hint">你被放逐了，可开枪带走一名玩家。</p>
+      <div id="hunter-list" class="vote-list"></div>
+    </div>
+
+    <!-- 等待猎人 -->
+    <div id="pending-box" class="panel pending-box hidden">
+      <p>猎人正在开枪，请稍候…</p>
+    </div>
+
+    <!-- 结果 -->
+    <div id="result-box" class="panel result-box hidden">
+      <div class="result-banner" id="result-banner"></div>
+      <ul id="result-list" class="result-list"></ul>
+      <div id="center-reveal" class="center-reveal"></div>
+      <button id="btn-restart" class="btn btn-primary btn-block">再来一局</button>
+    </div>
+
+    <!-- 房主控制 -->
+    <div class="host-controls" id="host-controls">
+      <button id="btn-start-vote" class="btn btn-primary btn-block hidden">结束发言 · 开始投票</button>
+    </div>
+  </section>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<!-- ============ 角色图鉴弹窗 ============ -->
+<div id="codex" class="codex-overlay hidden">
+  <div class="codex">
+    <header class="codex-head">
+      <h2>角色图鉴</h2>
+      <button id="codex-close" class="btn btn-ghost btn-icon" aria-label="关闭">✕</button>
+    </header>
+    <div class="codex-tabs" id="codex-tabs"></div>
+    <div class="codex-body" id="codex-body"></div>
+    <p class="codex-foot">共 <b id="codex-count">0</b> 个角色 · 阵营以颜色区分</p>
+  </div>
+</div>
+
+<script src="/roles.js"></script>
+<script src="/client.js"></script>
+</body>
+</html>

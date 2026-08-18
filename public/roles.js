@@ -1,0 +1,253 @@
+'use strict';
+// 一夜狼人杀 · 角色图鉴（展示用唯一数据源）
+// 与 server.js 的 ROLES 一一对应（key 一致），用于"角色图鉴"与身份卡说明。
+// phase: night(夜晚唤醒) / dusk(黄昏唤醒) / day(白天相关) / none(全程不唤醒)
+window.ROLE_LIB = [
+  // ---------------- 狼队 ----------------
+  {
+    key: 'werewolf', name: '狼人', team: 'wolf', teamName: '狼队',
+    phase: 'night', wake: true,
+    ability: '夜晚与狼队友互认身份；若你是场上唯一的狼，可查看一张中央底牌。',
+    goal: '投票结束时，至少有一只狼未被放逐即获胜。',
+    tip: '独狼务必看中央，判断狼是否躲在底牌中，再决定白天节奏。',
+  },
+  {
+    key: 'minion', name: '爪牙', team: 'wolf', teamName: '狼队',
+    phase: 'night', wake: true,
+    ability: '狼队的帮手，夜晚得知谁是狼人（狼也可能在中央底牌里）。',
+    goal: '与狼队同进退——只要狼队获胜，爪牙也获胜。',
+    tip: '你不是狼，被投票放逐不算狼队输；但狼全灭你就输。',
+  },
+  {
+    key: 'alpha_wolf', name: '阿尔法狼', team: 'wolf', teamName: '狼队',
+    phase: 'night', wake: true,
+    ability: '将一张中央底牌与一名玩家交换，把该底牌伪装成狼塞入玩家群。',
+    goal: '同狼队：至少一只狼不被放逐。',
+    tip: '可把"狼"藏到玩家堆，或把麻烦角色置换到中央。',
+  },
+  {
+    key: 'wolf_seer', name: '狼先知', team: 'wolf', teamName: '狼队',
+    phase: 'night', wake: true,
+    ability: '查看一名玩家的真实身份。',
+    goal: '同狼队：至少一只狼不被放逐。',
+    tip: '用查到的信息判断该保谁、白天带节奏投谁。',
+  },
+  // ---------------- 吸血鬼队 ----------------
+  {
+    key: 'vampire', name: '吸血鬼', team: 'vampire', teamName: '吸血鬼队',
+    phase: 'dusk', wake: true,
+    ability: '黄昏阶段把吸血鬼标记放到一名非吸血鬼玩家面前，其变为吸血鬼。',
+    goal: '吸血鬼队无人被放逐即获胜（与狼队互相独立）。',
+    tip: '黄昏先手扩军，优先标记关键好人。',
+  },
+  {
+    key: 'count', name: '伯爵', team: 'vampire', teamName: '吸血鬼队',
+    phase: 'dusk', wake: true,
+    ability: '黄昏阶段对一名玩家施加恐惧封锁。',
+    goal: '吸血鬼队无人被放逐即获胜。',
+    tip: '封锁能限制关键好人的行动与信息。',
+  },
+  {
+    key: 'renfield', name: '血奴', team: 'vampire', teamName: '吸血鬼队',
+    phase: 'dusk', wake: true,
+    ability: '黄昏阶段得知谁是吸血鬼。',
+    goal: '吸血鬼队无人被放逐即获胜。',
+    tip: '吸血鬼队的情报员，可与狼先知类比。',
+  },
+  // ---------------- 皮匠（独立） ----------------
+  {
+    key: 'tanner', name: '皮匠', team: 'tanner', teamName: '皮匠（独立）',
+    phase: 'none', wake: false,
+    ability: '没有任何能力，唯一的愿望是被放逐。',
+    goal: '若你被放逐、且没有任何狼人被放逐，你独赢。',
+    tip: '伪装成狼诱导大家投你；一旦有狼被投出你就输。',
+  },
+  // ---------------- 好人阵营 ----------------
+  {
+    key: 'mason', name: '守夜人', team: 'village', teamName: '好人阵营',
+    phase: 'night', wake: true,
+    ability: '与另一名守夜人互认，确定你的同伴（若搭档在中央则无同伴）。',
+    goal: '放逐至少一只狼即获胜。',
+    tip: '互认后两人白天可互通信息，是好人方的信任锚点。',
+  },
+  {
+    key: 'seer', name: '预言家', team: 'village', teamName: '好人阵营',
+    phase: 'night', wake: true,
+    ability: '查看一名玩家，或查看两张中央底牌的身份。',
+    goal: '放逐至少一只狼即获胜。',
+    tip: '信息最全，白天要敢于指认，但小心被狼针对。',
+  },
+  {
+    key: 'apprentice_seer', name: '见习预言家', team: 'village', teamName: '好人阵营',
+    phase: 'night', wake: true,
+    ability: '查看一张中央底牌的身份。',
+    goal: '放逐至少一只狼即获胜。',
+    tip: '只能看中央，信息有限；注意与预言家区分。',
+  },
+  {
+    key: 'paranormal_detective', name: '灵异侦探', team: 'village', teamName: '好人阵营',
+    phase: 'night', wake: true,
+    ability: '最多查看 2 名玩家的身份。',
+    goal: '放逐至少一只狼即获胜。',
+    tip: '比预言家更灵活，可一次查两人。',
+  },
+  {
+    key: 'robber', name: '强盗', team: 'village', teamName: '好人阵营',
+    phase: 'night', wake: true,
+    ability: '与一名玩家交换身份，并查看换来的新身份。',
+    goal: '放逐至少一只狼即获胜。',
+    tip: '换牌后你的身份已变，按新身份继续玩。',
+  },
+  {
+    key: 'witch', name: '女巫', team: 'village', teamName: '好人阵营',
+    phase: 'night', wake: true,
+    ability: '查看一张中央底牌，并可选与一名玩家交换身份。',
+    goal: '放逐至少一只狼即获胜。',
+    tip: '交换可制造混乱，但别轻易暴露自己。',
+  },
+  {
+    key: 'troublemaker', name: '捣蛋鬼', team: 'village', teamName: '好人阵营',
+    phase: 'night', wake: true,
+    ability: '悄悄交换另外两名玩家的身份（自己不变）。',
+    goal: '放逐至少一只狼即获胜。',
+    tip: '制造信息不对称，白天别轻易承认。',
+  },
+  {
+    key: 'village_idiot', name: '村庄白痴', team: 'village', teamName: '好人阵营',
+    phase: 'night', wake: true,
+    ability: '轮转所有其他玩家的身份牌（顺时针移动，自己不变）。',
+    goal: '放逐至少一只狼即获胜。',
+    tip: '全员身份大洗牌，谨慎使用，容易误伤队友。',
+  },
+  {
+    key: 'drunk', name: '酒鬼', team: 'village', teamName: '好人阵营',
+    phase: 'night', wake: true,
+    ability: '被迫与一张中央底牌随机交换身份（你不知换到什么）。',
+    goal: '放逐至少一只狼即获胜。',
+    tip: '你的真实身份已改变，可能已不是酒鬼，靠失眠者等验证。',
+  },
+  {
+    key: 'insomniac', name: '失眠者', team: 'village', teamName: '好人阵营',
+    phase: 'night', wake: true,
+    ability: '天亮前查看自己最终的身份。',
+    goal: '放逐至少一只狼即获胜。',
+    tip: '可确认自己是否被换/被变，是白天的真相来源。',
+  },
+  {
+    key: 'sentinel', name: '哨兵', team: 'village', teamName: '好人阵营',
+    phase: 'night', wake: true,
+    ability: '给一张牌（玩家或中央）上盾，本夜该牌不可被查/被换。',
+    goal: '放逐至少一只狼即获胜。',
+    tip: '盾可保护关键角色，或封锁底牌防止被调换。',
+  },
+  {
+    key: 'doppelganger', name: '化身幽灵', team: 'village', teamName: '好人阵营',
+    phase: 'night', wake: true,
+    ability: '查看一名玩家的身份（本作简化为仅查看）。',
+    goal: '放逐至少一只狼即获胜。',
+    tip: '原版会复制该角色能力，本作简化为查看，灵活且低风险。',
+  },
+  {
+    key: 'guardian', name: '监护人', team: 'village', teamName: '好人阵营',
+    phase: 'night', wake: true,
+    ability: '守护一名玩家（信息类，无额外操作）。',
+    goal: '放逐至少一只狼即获胜。',
+    tip: '守护对象天亮后已知，可配合发言与投票。',
+  },
+  {
+    key: 'revealer', name: '揭秘者', team: 'village', teamName: '好人阵营',
+    phase: 'night', wake: true,
+    ability: '揭示一名玩家的身份（信息类）。',
+    goal: '放逐至少一只狼即获胜。',
+    tip: '获得信息后白天可指认，是好人方情报点。',
+  },
+  {
+    key: 'bodyguard', name: '保镖', team: 'village', teamName: '好人阵营',
+    phase: 'day', wake: false,
+    ability: '投票前选择保护一人，其本票不被放逐。',
+    goal: '放逐至少一只狼（并保护关键好人）。',
+    tip: '保对人能直接扭转胜负，尤其保护预言家或自己。',
+  },
+  {
+    key: 'hunter', name: '猎人', team: 'village', teamName: '好人阵营',
+    phase: 'day', wake: false,
+    ability: '被放逐时可开枪带走一名玩家（同归于尽）。',
+    goal: '放逐至少一只狼。',
+    tip: '好人翻盘的关键，被投出也要拉一个下水，优先带狼。',
+  },
+  {
+    key: 'villager', name: '村民', team: 'village', teamName: '好人阵营',
+    phase: 'none', wake: false,
+    ability: '普通村民，没有特殊能力。',
+    goal: '放逐至少一只狼即获胜。',
+    tip: '靠发言与投票判断，别被带节奏。',
+  },
+  {
+    key: 'prince', name: '王子', team: 'village', teamName: '好人阵营',
+    phase: 'none', wake: false,
+    ability: '若你获得最高票，按规则顺延，由次高票者被放逐（你免死）。',
+    goal: '放逐至少一只狼即获胜。',
+    tip: '被冤枉时王子身份能救你一命，适合当"诱饵"。',
+  },
+  {
+    key: 'cursed', name: '被诅咒者', team: 'village', teamName: '好人阵营',
+    phase: 'none', wake: false,
+    ability: '若被狼人标记则变成狼（本作简化为夜里可能变狼）。',
+    goal: '名义是好人；若变狼则按狼队胜负计算。',
+    tip: '身份会在夜里悄悄改变，自己也可能不知道。',
+  },
+  // ---------------- 吸血鬼扩展（黄昏/标记系） ----------------
+  {
+    key: 'priest', name: '牧师', team: 'village', teamName: '好人阵营',
+    phase: 'dusk', wake: true,
+    ability: '黄昏阶段先给自己放「清白标记」，可再给一名玩家放清白标记以净化其原有标记（吸血鬼/恐惧/刺杀/爱之）。',
+    goal: '放逐至少一只狼 / 一名吸血鬼。',
+    tip: '清白标记能证明好人身份，净化可救回被标记的队友。',
+  },
+  {
+    key: 'sharpshooter', name: '神射手', team: 'village', teamName: '好人阵营',
+    phase: 'night', wake: true,
+    ability: '夜晚查看一名玩家的角色牌，并查看另一名玩家的状态标记。',
+    goal: '放逐至少一只狼 / 一名吸血鬼。',
+    tip: '同时掌握身份与标记两条线索，是标记局的关键情报位。',
+  },
+  {
+    key: 'thief', name: '小偷', team: 'village', teamName: '好人阵营',
+    phase: 'night', wake: true,
+    ability: '夜晚将一名玩家的状态标记换到自己面前，并查看之。',
+    goal: '放逐至少一只狼 / 一名吸血鬼。',
+    tip: '偷来的标记会误导他人，也可能让你看清标记博弈真相。',
+  },
+  {
+    key: 'gremlin', name: '小魔怪', team: 'village', teamName: '好人阵营',
+    phase: 'night', wake: true,
+    ability: '夜晚交换任意两名玩家的角色牌，或交换两名玩家的状态标记。',
+    goal: '放逐至少一只狼 / 一名吸血鬼。',
+    tip: '搬动角色牌或标记制造混乱，是标记局的终极搅局位。',
+  },
+  {
+    key: 'cupid', name: '丘比特', team: 'village', teamName: '好人阵营',
+    phase: 'dusk', wake: true,
+    ability: '黄昏阶段给两名玩家放「爱之标记」，令二人同生共死（一死则另一同死）。',
+    goal: '放逐至少一只狼 / 一名吸血鬼。',
+    tip: '爱之捆绑会在投票环节产生生死连锁，需谨慎选择捆绑对象。',
+  },
+  {
+    key: 'assassin', name: '刺客', team: 'assassin', teamName: '刺客（独立）',
+    phase: 'dusk', wake: true,
+    ability: '黄昏阶段给一名玩家放「刺杀标记」；该玩家死亡时你获胜（可与其他阵营同时获胜）。',
+    goal: '被你标记的玩家被放逐，你即获胜（自己是否存活无所谓）。',
+    tip: '独立阵营；标记目标死亡则独赢，可叠加在其它阵营胜负之上。',
+  },
+  // ---------------- 破晓（进阶） ----------------
+  {
+    key: 'tracker', name: '循迹者', team: 'village', teamName: '好人阵营',
+    phase: 'night', wake: true,
+    ability: '夜晚查看任意两名玩家的身份牌，判断它们本夜是否被对调。',
+    goal: '放逐至少一只狼。',
+    tip: '专门识破强盗/捣蛋鬼/村庄白痴的换牌，是"牌是否被移动"的鉴定者。',
+  },
+];
+
+// 快速索引
+window.ROLE_MAP = Object.fromEntries(window.ROLE_LIB.map(r => [r.key, r]));
