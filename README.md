@@ -3,44 +3,58 @@
 基于《一夜狼人杀指南》全部角色与桌游流程，打造的一款**零依赖、可联机**的网页版 App。
 创建房间 → 分享邀请 → 3-7 人组队 → AI 语音播报员按「黄昏 + 夜晚」顺序引导行动 → 白天语音/文字发言 → 投票 → 准确展示胜负。
 
-## 部署到 Koyeb（免费公网）
+## 部署到 Render（免费公网）
 
 本游戏是 **Node.js 后端 + 浏览器前端**：后端负责房间状态与实时同步，必须运行在一台"一直开机"的机器上。
-Koyeb 提供**免费实例**（512MB 内存 / 0.1 vCPU / 2GB SSD），无需信用卡，适合个人聚会长期挂着。
+Render 提供**免费实例**（750 小时/月，512MB 内存），无需信用卡，适合个人聚会使用。
 
-> 本项目已内置 `Dockerfile` 和 `koyeb.yaml`，开箱即用。
+> 本项目已内置 `Dockerfile`，开箱即用。
 
-### 第一步：注册 Koyeb 免费账号
+### 第一步：注册 Render 免费账号
 
-1. 打开 [app.koyeb.com](https://app.koyeb.com)，点 **Sign up**。
-2. 推荐直接点 **「Continue with GitHub」**——注册的同时就自动关联了 GitHub，跳到第二步即可。
-3. 用邮箱 / Google / passkey 注册也行，同样**不要求填信用卡**。
-4. 注册完即为免费档，无需任何付费操作。
-
-> 如果注册时没关联 GitHub，后续可在 **右上角头像 → User settings → Link to GitHub** 补关联。
+1. 打开 [render.com](https://render.com)，点 **Get Started**。
+2. 推荐直接点 **「Sign up with GitHub」**——注册的同时就自动关联了 GitHub。
+3. 用邮箱 / Google 注册也行，同样**不要求填信用卡**。
+4. 注册完即可使用免费档。
 
 ### 第二步：创建 Web Service
 
-1. 登录 [app.koyeb.com](https://app.koyeb.com)，在控制台页面点 **「Create Web Service」**。
-2. **Source** 选 **GitHub** → 授权 Koyeb 访问你的仓库（首次会跳转 GitHub 点 Authorize）。
-3. **Repository** 选你存放本项目的仓库和分支。
-4. **Builder** 选 **Dockerfile**（Koyeb 通常会自动检测到根目录的 Dockerfile）。
-5. **实例规格**选 **Nano**（免费）。区域默认 Frankfurt 或 Washington D.C. 即可。
-6. 点 **「Deploy」**，等待构建完成。
+1. 登录 [dashboard.render.com](https://dashboard.render.com)，点右上角 **「New +」** → 选 **「Web Service」**。
+2. **Connect a repository** → 选 **GitHub** → 授权 Render 访问你的仓库 → 选存放本项目的仓库。
+3. 填写服务配置：
+   - **Name**：随意（如 `one-night-werewolf`）
+   - **Region**：选离你近的（如 `Oregon` 或 `Frankfurt`）
+   - **Branch**：`main`（或你的默认分支）
+   - **Runtime**：选 **Docker**
+   - **Instance Type**：选 **Free**
+4. 点 **「Create Web Service」**，等待构建完成（首次约 2-3 分钟）。
 
-> 本项目根目录已有 `Dockerfile`（`node:20-alpine`，零依赖）和 `koyeb.yaml`（指定端口 3000、健康检查 `/api/presets`），无需额外配置。
+> 本项目根目录已有 `Dockerfile`（`node:20-alpine`，零依赖），Render 会自动检测并使用。
 
 ### 第三步：开始游戏
 
-部署完成后，你会获得一个 `https://xxx.koyeb.app` 的公网地址。手机浏览器打开即可创建 / 加入房间。
+部署完成后，你会获得一个 `https://xxx.onrender.com` 的公网地址。手机浏览器打开即可创建 / 加入房间。
 
-免费实例闲置时会自动休眠，下次访问冷启动几秒属正常。
+### 免费实例说明
 
-### 要点
-
+- 免费实例**闲置 15 分钟后会休眠**，下次访问需要约 30 秒冷启动（属正常）。
+- 每月 750 小时免费额度，足够个人使用（750 小时 ≈ 31 天不间断运行）。
 - 房间数据存内存，**重启即清空**，适合一局制聚会；如需持久化可自行接数据库。
+- 后续代码更新只需 `git push`，Render 会自动重新构建部署。
 - 手机端用 Chrome / Edge / Safari 打开公网链接，体验最佳（语音为浏览器内置能力）。
-- 后续代码更新只需 `git push`，Koyeb 会自动重新构建部署。
+
+### 备选：自有服务器 / VPS
+
+如果你有自己的服务器（如阿里云、腾讯云、树莓派等）：
+
+```bash
+# 任意装了 Node 18+ 的机器
+git clone <你的仓库> && cd 一夜狼人杀在线网页版
+PORT=3000 node server.js
+# 用 nginx / caddy 反代 3000 端口并配域名 + HTTPS 即可
+```
+
+Docker 方式：`docker build -t oww . && docker run -d -p 3000:3000 oww`
 
 ## 已实现功能
 
@@ -84,8 +98,7 @@ public/styles.css    # 手机优先样式
 public/roles.js      # 角色图鉴数据源（ROLE_LIB，34 角色结构化信息）
 public/client.js     # 状态同步、AI 播报员、行动UI、语音、投票、结果、角色图鉴渲染
 官方规则审计报告.md   # 基于官方规则书的角色库/流程/胜负审计结论
-koyeb.yaml           # Koyeb 一键部署配置（config-as-code）
-Dockerfile           # 公网容器镜像（node:20-alpine，零依赖）
+Dockerfile           # 容器镜像（node:20-alpine，零依赖，用于 Render/VPS 部署）
 test_flow.js         # 无头端到端测试（3 人自动走完一局，校验结果）
 ```
 
