@@ -162,6 +162,7 @@ function renderLobby(s) {
   if (fillBtn) fillBtn.disabled = s.players.length >= s.capacity;
   if (s.isHost) {
     renderReco(s.capacity, s.presetId, s.customActive);
+    updateCustomCount();
     let desc = '当前阵容：<b>' + (s.presetName || '—') + '</b>';
     if (!s.customActive) {
       const pr = PRESETS_CACHE.find(p => p.id === s.presetId);
@@ -171,13 +172,17 @@ function renderLobby(s) {
   }
 }
 
-// 推荐阵容卡片（4/5 人显示专属推荐；其余显示通用阵容）
+// 推荐阵容卡片（按牌堆大小 = 人数 + 3 过滤，确保中央固定 3 张）
 function renderReco(capacity, currentId, customActive) {
   const wrap = $('#reco-wrap');
-  const pick = (capacity === 4 || capacity === 5)
-    ? PRESETS_CACHE.filter(p => p.forCount === capacity)
-    : PRESETS_CACHE;
-  const title = (capacity === 4 || capacity === 5) ? `推荐阵容（${capacity} 人）` : '通用阵容（任意人数）';
+  const expectedCards = capacity + 3;
+  const pick = PRESETS_CACHE.filter(p => p.cards.length === expectedCards);
+  // 无匹配预设时提示自选
+  if (pick.length === 0) {
+    wrap.innerHTML = `<div class="reco-title">${capacity} 人局暂无推荐阵容，请使用下方「自选角色」配置 ${expectedCards} 张身份牌</div>`;
+    return;
+  }
+  const title = `推荐阵容（${capacity} 人 · ${expectedCards} 张牌）`;
   wrap.innerHTML = `<div class="reco-title">${title}</div>` + pick.map(p => {
     const sel = (p.id === currentId && !customActive) ? ' sel' : '';
     return `<button class="reco-card${sel}" data-id="${p.id}"><span class="reco-name">${escapeHtml(p.name)}</span><span class="reco-cards">${escapeHtml(p.cards.join('、'))}</span></button>`;
@@ -193,11 +198,21 @@ function buildRoleCheckGrid() {
   const grid = $('#role-check-grid');
   if (grid.dataset.built) return;
   const lib = window.ROLE_LIB || [];
-  grid.innerHTML = lib.map(r => `<label class="role-check"><input type="checkbox" value="${r.key}" /> ${escapeHtml(r.name)}</label>`).join('');
+  grid.innerHTML = lib.map(r => `<label class="role-check"><input type="checkbox" value="${r.key}" /> ${escapeHtml(r.name)}</label>`).join('') + '<div id="custom-count" class="custom-count"></div>';
   grid.dataset.built = '1';
   grid.querySelectorAll('input').forEach(cb => cb.onchange = () => {
     if (cb.checked) customRoles.add(cb.value); else customRoles.delete(cb.value);
+    updateCustomCount();
   });
+}
+function updateCustomCount() {
+  const el = $('#custom-count');
+  if (!el) return;
+  const cap = STATE.data && STATE.data.capacity || 5;
+  const need = cap + 3;
+  const ok = customRoles.size === need;
+  el.textContent = `已选 ${customRoles.size} / 需要 ${need} 张`;
+  el.className = 'custom-count' + (ok ? ' ok' : (customRoles.size > need ? ' over' : ''));
 }
 
 // 准备按钮高亮状态
@@ -228,9 +243,13 @@ $('#btn-add-bot').onclick = () => api('/api/action', { token: STATE.token, type:
 $('#btn-fill-bots').onclick = () => api('/api/action', { token: STATE.token, type: 'addBot', payload: { fill: true } });
 $('#btn-custom-toggle').onclick = () => { buildRoleCheckGrid(); $('#custom-wrap').classList.toggle('hidden'); };
 $('#btn-apply-custom').onclick = () => {
+  const cap = STATE.data && STATE.data.capacity || 5;
+  const need = cap + 3;
   if (customRoles.size < 3) return toast('至少勾选 3 个角色');
-  api('/api/action', { token: STATE.token, type: 'setCustom', payload: { roles: [...customRoles] } });
-  toast('已应用自选阵容');
+  api('/api/action', { token: STATE.token, type: 'setCustom', payload: { roles: [...customRoles] } }).then(r => {
+    if (r.data && r.data.warning) toast(r.data.warning);
+    else toast(`已应用自选阵容（${customRoles.size} 张）`);
+  });
 };
 $('#btn-copy').onclick = () => {
   const link = `${location.origin}/?code=${STATE.code}`;
@@ -515,9 +534,27 @@ function addSpeech(d) {
 }
 
 $('#btn-mic').onclick = toggleMic;
-function toggleMic() {
+async function toggleMic() {
   if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) { toast('当前浏览器不支持语音识别，请手动输入'); return; }
   if (recording) { stopMic(); return; }
+  // 先请求麦克风权限（避免 SpeechRecognition 静默失败）
+  try {
+    const perm = await navigator.permissions.query({ name: 'microphone' });
+    if (perm.state === 'denied') {
+      $('#mic-status').textContent = '麦克风权限被拒绝：请点击地址栏图标允许麦克风访问';
+      toast('麦克风权限被拒绝，请点击浏览器地址栏麦克风图标允许后重试');
+      return;
+    }
+  } catch (_) { /* permissions API 不可用时继续尝试 */ }
+  // 部分浏览器需要通过 getUserMedia 触发权限弹窗
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach(t => t.stop()); // 立即释放，只为触发权限
+  } catch (err) {
+    $('#mic-status').textContent = '无法访问麦克风：' + (err.name || err.message);
+    toast('无法访问麦克风，请检查浏览器权限设置');
+    return;
+  }
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   micRec = new SR();
   micRec.lang = 'zh-CN'; micRec.interimResults = true; micRec.continuous = false;
@@ -527,8 +564,13 @@ function toggleMic() {
     $('#mic-status').textContent = '识别中：' + t;
   };
   micRec.onend = () => { if (recording) { recording = false; $('#btn-mic').classList.remove('recording'); $('#mic-status').textContent = '已停止'; } };
-  micRec.onerror = (e) => { recording = false; $('#btn-mic').classList.remove('recording'); $('#mic-status').textContent = '语音识别出错：' + e.error; };
-  try { micRec.start(); recording = true; $('#btn-mic').classList.add('recording'); $('#mic-status').textContent = '正在聆听，请发言…'; } catch (_) { toast('无法启动麦克风'); }
+  micRec.onerror = (e) => {
+    recording = false; $('#btn-mic').classList.remove('recording');
+    const msg = e.error === 'not-allowed' ? '麦克风权限被拒绝（点击地址栏图标允许）' : ('语音识别出错：' + e.error);
+    $('#mic-status').textContent = msg;
+    if (e.error !== 'aborted') toast(msg);
+  };
+  try { micRec.start(); recording = true; $('#btn-mic').classList.add('recording'); $('#mic-status').textContent = '正在聆听，请发言…'; } catch (_) { toast('无法启动语音识别'); }
 }
 function stopMic() { if (micRec) micRec.stop(); recording = false; $('#btn-mic').classList.remove('recording'); }
 

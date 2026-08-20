@@ -56,10 +56,15 @@ const ROLES = {
 };
 
 // ----------------------------- 预设阵容（来自《5人版/4人版指南》） -----------------------------
-// 每张预设固定若干张身份牌：发玩家人 + 余下置中央底牌。
-// forCount 标记该阵容专为几人局设计（4 / 5）；其余人数可走「通用阵容」或自选。
+// 每张预设固定若干张身份牌：发玩家人数 + 3 张中央底牌。
+// forCount 标记该阵容专为几人局设计；前端按 cards.length === capacity + 3 过滤显示。
 const PRESETS = [
-  // ===== 5 人版推荐阵容（每局 8 张：5 玩家 + 3 中央）=====
+  // ===== 3 人版（每局 6 张：3 玩家 + 3 中央）=====
+  { id: 'S1', name: 'S1·经典三人(首推)',      forCount: 3, cards: ['werewolf','minion','seer','robber','troublemaker','insomniac'], hasDusk: false },
+  { id: 'S2', name: 'S2·无爪牙信息局',        forCount: 3, cards: ['werewolf','seer','robber','troublemaker','drunk','insomniac'],       hasDusk: false },
+  { id: 'S3', name: 'S3·皮匠搅局',            forCount: 3, cards: ['werewolf','minion','tanner','seer','robber','insomniac'],           hasDusk: false },
+  { id: 'S4', name: 'S4·吸血鬼入门',          forCount: 3, cards: ['vampire','renfield','seer','robber','troublemaker','villager'],    hasDusk: true },
+  // ===== 4 人版推荐阵容（每局 7 张：4 玩家 + 3 中央，来自《4人版指南》）=====
   { id: 'M1', name: 'M1·新手友好·明察(首推)', forCount: 5, cards: ['werewolf','minion','seer','robber','troublemaker','insomniac','mason','mason'], hasDusk: false },
   { id: 'M2', name: 'M2·双预言·信息局',       forCount: 5, cards: ['werewolf','minion','seer','apprentice_seer','robber','insomniac','troublemaker','villager'], hasDusk: false },
   { id: 'M3', name: 'M3·女巫搅局(破晓1)',     forCount: 5, cards: ['werewolf','minion','seer','witch','robber','troublemaker','insomniac','sentinel'], hasDusk: false },
@@ -78,6 +83,18 @@ const PRESETS = [
   { id: 'V3', name: 'V3·刺客与爱神(进阶2)',    forCount: 5, cards: ['vampire','count','renfield','priest','sharpshooter','thief','cupid','assassin'], hasDusk: true },
   { id: 'V4', name: 'V4·标记混战(进阶3)',      forCount: 5, cards: ['vampire','count','renfield','priest','sharpshooter','thief','gremlin','drunk'], hasDusk: true },
   { id: 'V5', name: 'V5·狼血大战(史诗)',       forCount: 5, cards: ['werewolf','minion','vampire','renfield','priest','sharpshooter','robber','troublemaker'], hasDusk: true },
+  // ===== 6 人版（每局 9 张：6 玩家 + 3 中央）=====
+  { id: 'X1', name: 'X1·经典扩展(首推)',      forCount: 6, cards: ['werewolf','minion','seer','robber','troublemaker','insomniac','mason','mason','villager'],         hasDusk: false },
+  { id: 'X2', name: 'X2·双预言扩展',          forCount: 6, cards: ['werewolf','minion','seer','apprentice_seer','robber','troublemaker','drunk','insomniac','hunter'], hasDusk: false },
+  { id: 'X3', name: 'X3·女巫+保镖',           forCount: 6, cards: ['werewolf','minion','seer','witch','robber','troublemaker','insomniac','bodyguard','villager'], hasDusk: false },
+  { id: 'X4', name: 'X4·三阵营混战',          forCount: 6, cards: ['werewolf','minion','tanner','seer','robber','troublemaker','drunk','insomniac','hunter'],       hasDusk: false },
+  { id: 'Y1', name: 'Y1·吸血鬼扩展(简单)',    forCount: 6, cards: ['vampire','count','renfield','seer','robber','troublemaker','insomniac','sentinel','villager'],  hasDusk: true },
+  { id: 'Y2', name: 'Y2·狼血大战扩展',        forCount: 6, cards: ['werewolf','minion','vampire','renfield','priest','sharpshooter','robber','troublemaker','sentinel'], hasDusk: true },
+  // ===== 7 人版（每局 10 张：7 玩家 + 3 中央）=====
+  { id: 'Z1', name: 'Z1·满员经典(首推)',       forCount: 7, cards: ['werewolf','minion','seer','robber','troublemaker','insomniac','mason','mason','drunk','villager'],     hasDusk: false },
+  { id: 'Z2', name: 'Z2·全员能力',             forCount: 7, cards: ['werewolf','minion','seer','witch','robber','troublemaker','drunk','insomniac','hunter','bodyguard'], hasDusk: false },
+  { id: 'Z3', name: 'Z3·史诗大战',             forCount: 7, cards: ['alpha_wolf','werewolf','minion','seer','witch','robber','troublemaker','insomniac','sentinel','revealer'], hasDusk: false },
+  { id: 'W1', name: 'W1·吸血鬼满员局',        forCount: 7, cards: ['vampire','count','renfield','priest','sharpshooter','thief','cupid','assassin','seer','robber'],   hasDusk: true },
   // ===== 4 人版推荐阵容（每局 7 张：4 玩家 + 3 中央，来自《4人版指南》）=====
   { id: 'P1', name: 'P1·新手友好·守夜人互认',   forCount: 4, cards: ['werewolf','minion','mason','mason','seer','troublemaker','insomniac'], hasDusk: false },
   { id: 'P2', name: 'P2·双预言·信息局',         forCount: 4, cards: ['werewolf','minion','seer','apprentice_seer','robber','insomniac','villager'], hasDusk: false },
@@ -303,7 +320,12 @@ function startGame(room) {
     ? room.roleDeck
     : (PRESETS.find(x => x.id === room.presetId) || PRESETS[0]).cards;
   if (!deckSrc || deckSrc.length < n) { return { error: '身份牌数量不足，至少需要与人数相等' }; }
-  // 牌堆 = 玩家人 + 中央底牌（牌堆长度可变：4 人局 7 张、5 人局 8 张…）
+  // 校验：牌堆大小必须等于 玩家人数 + 3（中央固定 3 张底牌）
+  const expectedSize = n + 3;
+  if (deckSrc.length !== expectedSize) {
+    return { error: `当前${n}人局需要 ${expectedSize} 张身份牌（${n}玩家+3中央），但选中阵容有 ${deckSrc.length} 张。请切换阵容或调整自选角色。` };
+  }
+  // 牌堆 = 玩家人 + 中央底牌（牌堆长度可变：3 人局 6 张、4 人局 7 张…）
   const deck = shuffle(deckSrc.slice());
   const hasDusk = deck.some(k => ROLES[k] && ROLES[k].duskAction);
   room.deck = deck;
@@ -1156,6 +1178,12 @@ const server = http.createServer((req, res) => {
           if (p.token !== room.hostToken) return sendJSON(res, { error: '仅房主可操作' });
           const roles = Array.isArray(payload && payload.roles) ? payload.roles.filter(k => ROLES[k]) : [];
           if (roles.length < 3) return sendJSON(res, { error: '至少选择 3 个角色' }, 400);
+          const expected = room.capacity + 3;
+          if (roles.length !== expected) {
+            // 软提示：不拒绝（玩家可能还在加入），但返回警告
+            room.roleDeck = roles; room.presetId = null; pushState(room);
+            return sendJSON(res, { ok: true, warning: `当前${room.capacity}人局建议选 ${expected} 张牌（你选了 ${roles.length} 张），开始游戏时会严格校验。` });
+          }
           room.roleDeck = roles; room.presetId = null; pushState(room);
           break;
         }
