@@ -19,16 +19,18 @@ node server.js
 
 ## 部署到公网（户外手机也能玩）
 
-**推荐：Hugging Face Spaces（Docker）**——免费、免信用卡、2 vCPU / 16GB RAM。
+> **2026-08 实测**：Koyeb（被收购无免费档）、Glitch（关停）、Render（要信用卡）、Hugging Face Spaces Docker/Gradio（需 PRO $9/月）——主流平台全部不可用。
+>
+> **当前确认免卡免费方案：Bonto / SnapDeploy**（小平台，见下方 `部署指南.md`）。代码零改动，`server.js` 已读 `process.env.PORT`。
 
-### 步骤
+### 快速部署：Bonto（推荐）
 
-1. 注册 https://huggingface.co （免卡）。
-2. 右上角头像 → **New Space** → Name 填 `one-night-werewolf` → SDK 选 **Docker** → Template 选 **Blank** → Hardware 保持 **Free** → Create。
-3. 进入 Space 的 **Files** 标签，把仓库全部文件上传（或 `git clone` 后 push 到 HF Git 地址）。
-4. 构建成功后获得 `https://<user>-one-night-werewolf.hf.space`，手机浏览器打开即可联机。
+1. 注册 https://bonto.dev （免卡，Node.js 原生运行）。
+2. Create New App → 上传 `server.js` + `package.json` + `public/` 全部文件。
+3. Start Command 填 `node server.js` → Deploy。
+4. 获得 `https://<app名>.bonto.run`，手机浏览器打开即可联机。
 
-> HF 自动注入 `PORT=7860`，`server.js` 已读取 `process.env.PORT`，零代码改动。空闲 48h 才休眠，有人玩不会休眠。房间数据存内存，重启即清空，每局重新建房即可。
+> 休眠 30 分钟（唤醒 ~2–5s），一局游戏 15–30 分钟在窗口内。详见 `部署指南.md`。
 
 ### 备选：自有服务器
 
@@ -79,8 +81,8 @@ public/index.html    # 页面骨架（首页/大厅/游戏/角色图鉴弹窗）
 public/styles.css    # 手机优先样式
 public/roles.js      # 角色图鉴数据源（ROLE_LIB，34 角色结构化信息）
 public/client.js     # 状态同步、AI 播报员、行动UI、语音、投票、结果、角色图鉴渲染
-Dockerfile           # 容器镜像（node:20-alpine，HF Spaces / 自有服务器通用）
-部署指南.md          # Hugging Face Spaces 免费免卡部署步骤
+Dockerfile           # 容器镜像（node:20-alpine，SnapDeploy / 自有服务器通用）
+部署指南.md          # Bonto / SnapDeploy 免费免卡部署步骤（2026-08 实测）
 官方规则审计报告.md   # 基于官方规则书的角色库/流程/胜负审计结论
 test_flow.js         # 无头端到端测试（3 人自动走完一局，校验结果）
 ```
