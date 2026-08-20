@@ -1036,13 +1036,33 @@ function shiftSeat(room, removed) {
 // ----------------------------- HTTP / SSE -----------------------------
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp' };
 
+// 基于文件内容生成短哈希，用作静态资源版本号（内容变化→URL 变化→绕过任何平台层强缓存）
+function fileHash(p) {
+  try { return crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex').slice(0, 8); } catch (_) { return '0'; }
+}
+
 function serveStatic(req, res, pathname) {
   let f = pathname === '/' ? '/index.html' : pathname;
   const fp = path.join(PUBLIC_DIR, path.normalize(f).replace(/^(\.\.[/\\])+/, ''));
   if (!fp.startsWith(PUBLIC_DIR)) { res.writeHead(403); res.end('forbidden'); return; }
   fs.readFile(fp, (err, data) => {
     if (err) { res.writeHead(404); res.end('not found'); return; }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(fp)] || 'application/octet-stream' });
+    const ext = path.extname(fp);
+    const headers = { 'Content-Type': MIME[ext] || 'application/octet-stream' };
+    if (ext === '.html') {
+      // 给页面内引用的 JS/CSS 注入内容哈希版本号，彻底规避平台层对静态文件的强缓存
+      let html = data.toString('utf8');
+      html = html.replace(/(src|href)="(\/[^"?]+\.(?:js|css))"/g, (m, attr, p) => {
+        return `${attr}="${p}?v=${fileHash(path.join(PUBLIC_DIR, p))}"`;
+      });
+      data = Buffer.from(html, 'utf8');
+      headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
+    } else if (ext === '.js' || ext === '.css') {
+      headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
+    } else {
+      headers['Cache-Control'] = 'public, max-age=86400';
+    }
+    res.writeHead(200, headers);
     res.end(data);
   });
 }
