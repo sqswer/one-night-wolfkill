@@ -1,0 +1,16 @@
+# 依赖（本项目零依赖，仅为保险）
+node_modules/
+
+# 临时目录（图片生成等工作目录）
+_tmp/
+**/_tmp/
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+*.log
+*.swp
+
+# 环境变量 / 密钥
+.env
+.env.*
