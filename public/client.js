@@ -221,8 +221,8 @@ function renderReco(capacity, currentId, customActive) {
 
   const title = `推荐阵容（${capacity} 人 · ${expectedCards} 张牌）`;
   let html = `<div class="reco-title">${title}</div>`;
-  grouped.forEach(g => {
-    const gid = 'reco-g-' + g.key;
+  grouped.forEach((g, gi) => {
+    const gid = 'reco-g-' + gi;
     html += `<div class="reco-group">
       <button class="reco-group-head" data-target="${gid}" aria-expanded="false">
         <span class="reco-group-label">${g.label}</span>
