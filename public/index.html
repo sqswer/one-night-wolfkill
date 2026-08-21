@@ -45,7 +45,10 @@
         <span class="room-id-label">房间号</span>
         <span class="room-id-value" id="lobby-code">------</span>
       </div>
-      <button id="btn-copy" class="btn btn-ghost btn-sm">复制邀请</button>
+      <div class="topbar-actions">
+        <button id="btn-voice-lobby" class="btn btn-ghost btn-icon voice-toggle" title="开启实时语音">🎙️</button>
+        <button id="btn-copy" class="btn btn-ghost btn-sm">复制邀请</button>
+      </div>
     </header>
 
     <div class="card">
@@ -92,9 +95,15 @@
       <div class="phase" id="phase-pill"><span class="dot"></span><span id="phase-text">准备中</span></div>
       <div class="topbar-actions">
         <span class="conn" id="conn-dot" title="连接状态"></span>
+        <button id="btn-voice" class="btn btn-ghost btn-icon voice-toggle" title="开启实时语音">🎙️</button>
         <button id="btn-tts" class="btn btn-ghost btn-icon" title="语音播报开关">🔊</button>
       </div>
     </header>
+
+    <!-- 房间实时语音状态 -->
+    <div class="voice-bar hidden" id="voice-bar">
+      <span class="voice-bar-status" id="voice-bar-status"></span>
+    </div>
 
     <!-- 夜晚 / 黄昏 进度（AI 引导） -->
     <div class="stepper hidden" id="stepper">

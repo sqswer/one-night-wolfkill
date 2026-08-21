@@ -122,6 +122,8 @@ function connectSSE() {
   es.addEventListener('speak', (e) => { speakAnnounce(JSON.parse(e.data).text); });
   es.addEventListener('speech', (e) => { addSpeech(JSON.parse(e.data)); });
   es.addEventListener('hunter', (e) => { const d = JSON.parse(e.data); toast(`猎人 ${d.name} 被放逐，可开枪`); });
+  es.addEventListener('voice', (e) => { onVoiceState((JSON.parse(e.data).seats) || []); });
+  es.addEventListener('signal', (e) => { const d = JSON.parse(e.data); onVoiceSignal(d.from, d.data); });
 }
 
 // --------------------------- 状态渲染 ---------------------------
@@ -132,6 +134,7 @@ const PHASE_NAME = {
 
 function onState(s) {
   STATE.data = s;
+  voiceApplyPhase(s.phase);
   if (s.phase === 'lobby') { renderLobby(s); showScreen('lobby'); }
   else { showScreen('game'); renderGame(s); }
 }
@@ -296,6 +299,7 @@ function updateReadyBtn(ready) {
 
 // 离开房间 → 回到首页
 function leaveRoom() {
+  voiceTeardown();
   api('/api/action', { token: STATE.token, type: 'leave' });
   if (es) { es.close(); es = null; }
   STATE.token = null; STATE.code = null; STATE.seat = null; STATE.data = null;
@@ -708,6 +712,154 @@ $('#btn-tts').onclick = () => {
   if (!ttsOn && 'speechSynthesis' in window) speechSynthesis.cancel();
   toast(ttsOn ? '语音播报已开启' : '语音播报已关闭');
 };
+
+// --------------------------- 房间实时语音（WebRTC Mesh） ---------------------------
+// 信令经服务器 SSE 转发（voice / signal 事件），音频流走浏览器 P2P，不经过服务器。
+// 约定：座位号小的一方作为发起方（创建 offer），避免双方同时 offer 冲突。
+const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+let voiceOn = false;          // 本地麦克风是否已加入通话
+let localStream = null;       // 本地麦克风流
+let voicePeers = new Map();   // seat -> { pc, audio, pendingCandidates }
+let voiceNightMuted = false;  // 夜晚/黄昏自动静音
+
+function voiceSend(subtype, extra) {
+  api('/api/action', { token: STATE.token, type: 'voice', payload: Object.assign({ subtype }, extra || {}) });
+}
+
+function voiceMakePeer(seat) {
+  if (!window.RTCPeerConnection) return null;
+  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  const audio = document.createElement('audio');
+  audio.autoplay = true; audio.playsInline = true;
+  const peer = { pc, audio, pendingCandidates: [] };
+  if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+  pc.onicecandidate = (e) => { if (e.candidate) voiceSend('signal', { to: seat, data: { candidate: e.candidate } }); };
+  pc.ontrack = (e) => { if (e.streams && e.streams[0]) { audio.srcObject = e.streams[0]; audio.play().catch(() => {}); } };
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') voiceClosePeer(seat);
+  };
+  return peer;
+}
+
+// 本地（座位号更小者）主动发起连接
+async function voiceInitiate(seat) {
+  if (voicePeers.has(seat)) return;
+  const peer = voiceMakePeer(seat);
+  if (!peer) { toast('当前浏览器不支持 WebRTC 实时语音'); return; }
+  voicePeers.set(seat, peer);
+  try {
+    const offer = await peer.pc.createOffer();
+    await peer.pc.setLocalDescription(offer);
+    voiceSend('signal', { to: seat, data: { desc: peer.pc.localDescription } });
+  } catch (_) { voiceClosePeer(seat); }
+}
+
+async function onVoiceSignal(from, data) {
+  if (!data) return;
+  let peer = voicePeers.get(from);
+  if (data.desc) {
+    if (!peer) {
+      if (data.desc.type !== 'offer') return; // 无连接时的 answer 忽略
+      peer = voiceMakePeer(from);
+      if (!peer) return;
+      voicePeers.set(from, peer);
+    }
+    try {
+      await peer.pc.setRemoteDescription(data.desc);
+      if (data.desc.type === 'offer') {
+        const ans = await peer.pc.createAnswer();
+        await peer.pc.setLocalDescription(ans);
+        voiceSend('signal', { to: from, data: { desc: peer.pc.localDescription } });
+      }
+      for (const c of peer.pendingCandidates) { try { await peer.pc.addIceCandidate(c); } catch (_) {} }
+      peer.pendingCandidates = [];
+    } catch (_) {}
+  } else if (data.candidate) {
+    if (!peer) return;
+    if (peer.pc.remoteDescription) { try { await peer.pc.addIceCandidate(data.candidate); } catch (_) {} }
+    else peer.pendingCandidates.push(data.candidate);
+  }
+}
+
+function voiceClosePeer(seat) {
+  const peer = voicePeers.get(seat);
+  if (peer) {
+    try { peer.pc.close(); } catch (_) {}
+    try { peer.audio.srcObject = null; peer.audio.remove(); } catch (_) {}
+    voicePeers.delete(seat);
+  }
+}
+
+function voiceTeardown() {
+  for (const seat of [...voicePeers.keys()]) voiceClosePeer(seat);
+  if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
+  voiceOn = false; voiceNightMuted = false;
+  renderVoice();
+}
+
+function onVoiceState(seats) {
+  const mySeat = STATE.seat;
+  const other = (seats || []).filter(s => s !== mySeat);
+  for (const seat of [...voicePeers.keys()]) {
+    if (!other.includes(seat)) voiceClosePeer(seat);
+  }
+  renderVoice(other);
+  if (!voiceOn) return;
+  for (const seat of other) {
+    if (!voicePeers.has(seat) && mySeat < seat) voiceInitiate(seat);
+  }
+}
+
+// 夜晚/黄昏自动静音，白天/投票/结算恢复
+function voiceApplyPhase(phase) {
+  const isNight = phase === 'dusk' || phase === 'night';
+  voiceNightMuted = isNight;
+  if (localStream) localStream.getAudioTracks().forEach(t => { t.enabled = !isNight; });
+  renderVoice();
+}
+
+async function toggleVoice() {
+  if (voiceOn) {
+    voiceSend('leave');
+    voiceTeardown();
+    toast('已退出语音通话');
+    return;
+  }
+  if (!window.RTCPeerConnection) { toast('当前浏览器不支持 WebRTC，请换用 Chrome / Edge'); return; }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('无法访问麦克风（需 HTTPS 或 localhost）'); return; }
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+  } catch (err) {
+    localStream = null;
+    toast('麦克风权限被拒绝：' + (err && (err.name || err.message) || '无法访问'));
+    return;
+  }
+  voiceOn = true;
+  renderVoice();
+  voiceSend('join');
+  toast('已加入语音通话');
+}
+
+function renderVoice(members) {
+  const list = members !== undefined ? members : [...voicePeers.keys()].filter(s => s !== STATE.seat);
+  $$('.voice-toggle').forEach(b => {
+    b.classList.toggle('on', voiceOn);
+    b.textContent = voiceOn ? '🔴' : '🎙️';
+    b.title = voiceOn ? '关闭实时语音' : '开启实时语音';
+  });
+  const bar = $('#voice-bar');
+  if (!bar) return;
+  if (!voiceOn) { bar.classList.add('hidden'); return; }
+  bar.classList.remove('hidden');
+  const players = (STATE.data && STATE.data.players) || [];
+  const names = players.filter(p => list.includes(p.seat)).map(p => p.name);
+  let txt = '🎙️ 通话中：你';
+  if (names.length) txt += '、' + names.join('、');
+  else txt += '（等待他人加入）';
+  if (voiceNightMuted) txt += ' · 🔇 夜晚已静音';
+  $('#voice-bar-status').textContent = txt;
+}
+$$('.voice-toggle').forEach(b => b.onclick = toggleVoice);
 
 // --------------------------- 角色图鉴 ---------------------------
 const CODEX_TEAMS = [

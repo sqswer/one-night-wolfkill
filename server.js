@@ -176,6 +176,7 @@ function makeRoom(hostName, capacity = 5) {
     discussionEndsAt: null,
     result: null,
     sse: [],                // {token, res}
+    voice: new Set(),      // 开启语音的玩家 token 集合（WebRTC mesh 信令由服务器转发，音频走 P2P 不经过服务器）
   };
   rooms.set(code, room);
   return room;
@@ -205,6 +206,19 @@ function sendPrivate(room, token, text) {
     if (c.token === token) { try { c.res.write(`event: private\ndata: ${JSON.stringify({ text })}\n\n`); } catch (_) {} }
   }
 }
+
+// WebRTC 语音：点对点信令转发 + 成员查询
+function pushTo(room, token, event, data) {
+  const c = room.sse.find(x => x.token === token);
+  if (!c) return;
+  try { c.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch (_) {}
+}
+function voiceSeats(room) {
+  const arr = [];
+  for (const t of room.voice) { const pl = findPlayer(room, t); if (pl) arr.push(pl.seat); }
+  return arr;
+}
+function seatToToken(room, seat) { const p = room.players.find(x => x.seat === seat); return p ? p.token : null; }
 
 // 推送个性化状态给每位玩家
 function pushState(room) {
@@ -1051,11 +1065,13 @@ function removePlayer(room, p) {
   if (idx < 0) return;
   room.players.splice(idx, 1);
   room.sse = room.sse.filter(c => c.token !== p.token);
+  room.voice.delete(p.token);
   if (room.players.length === 0) { rooms.delete(room.code); return; }
   // 重新编排座位号（删掉被移除者，其余前移）
   room.players.forEach((pl, i) => pl.seat = i);
   if (room.phase !== 'lobby' && room.phase !== 'result') shiftSeat(room, idx);
   if (room.hostToken === p.token) room.hostToken = room.players[0].token;
+  if (room.players.length) broadcast(room, 'voice', { seats: voiceSeats(room) });
   pushState(room);
 }
 
@@ -1143,6 +1159,7 @@ const server = http.createServer((req, res) => {
     req.on('close', () => {
       room.sse = room.sse.filter(c => c !== client);
       const pp = findPlayer(room, token); if (pp) pp.connected = room.sse.some(c => c.token === token);
+      if (room.voice.has(token)) { room.voice.delete(token); broadcast(room, 'voice', { seats: voiceSeats(room) }); }
     });
     return;
   }
@@ -1254,6 +1271,13 @@ const server = http.createServer((req, res) => {
           if (p.token !== room.hostToken) return sendJSON(res, { error: '仅房主可重开' });
           restartGame(room); break;
         case 'ping': break;
+      case 'voice': {
+        const sub = payload && payload.subtype;
+        if (sub === 'join') { room.voice.add(token); broadcast(room, 'voice', { seats: voiceSeats(room) }); }
+        else if (sub === 'leave') { room.voice.delete(token); broadcast(room, 'voice', { seats: voiceSeats(room) }); }
+        else if (sub === 'signal') { const to = seatToToken(room, payload.to); if (to && to !== token) pushTo(room, to, 'signal', { from: p.seat, data: payload.data }); }
+        break;
+      }
         default: return sendJSON(res, { error: 'unknown action' }, 400);
       }
       return sendJSON(res, result);

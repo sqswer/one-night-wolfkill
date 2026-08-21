@@ -127,6 +127,13 @@ select { appearance: none; -webkit-appearance: none; padding-right: 38px; }
 .conn { width: 9px; height: 9px; border-radius: 50%; background: #ff6b81; transition: background .3s; box-shadow: 0 0 8px #ff6b81; }
 .conn.on { background: var(--village); box-shadow: 0 0 8px var(--village); }
 
+/* ---------- 房间实时语音 ---------- */
+.voice-toggle.on { background: rgba(255,107,129,.18); border-color: var(--wolf); color: #fff; box-shadow: 0 0 10px rgba(255,107,129,.5); }
+.voice-bar { display: flex; align-items: center; gap: 8px; margin: 4px 0 10px; padding: 8px 12px;
+  background: rgba(52,211,153,.08); border: 1px solid rgba(52,211,153,.35); border-radius: 12px; }
+.voice-bar-status { font-size: 13px; color: var(--village); font-weight: 600; line-height: 1.4; }
+
+
 /* ---------- 玩家列表 ---------- */
 .player-list { list-style: none; padding: 0; margin: 0; }
 .player-list li { display: flex; align-items: center; gap: 12px; padding: 12px 14px;
