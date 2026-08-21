@@ -163,27 +163,36 @@ function renderLobby(s) {
   if (s.isHost) {
     renderReco(s.capacity, s.presetId, s.customActive);
     updateCustomCount();
-    let desc = '当前阵容：<b>' + (s.presetName || '—') + '</b>';
-    if (!s.customActive) {
-      const pr = PRESETS_CACHE.find(p => p.id === s.presetId);
-      if (pr) desc += '　身份牌：<b>' + pr.cards.join('、') + '</b>';
+    const descEl = $('#preset-desc');
+    // 3/6/7 人局：推荐阵容区已隐藏，这句"当前阵容"说明也一并隐藏
+    if (!RECO_GROUPS[s.capacity]) {
+      descEl.innerHTML = '';
+      descEl.classList.add('hidden');
+    } else {
+      descEl.classList.remove('hidden');
+      let desc = '当前阵容：<b>' + (s.presetName || '—') + '</b>';
+      if (!s.customActive) {
+        const pr = PRESETS_CACHE.find(p => p.id === s.presetId);
+        if (pr) desc += '　身份牌：<b>' + pr.cards.join('、') + '</b>';
+      }
+      descEl.innerHTML = desc;
     }
-    $('#preset-desc').innerHTML = desc;
   }
 }
 
 // 推荐阵容卡片（4/5 人显示折叠分组；3/6/7 人隐藏，只留自选）
 const RECO_GROUPS = {
-  // 4人局分组
+  // 4人局分组（参考《4人版指南》）
   4: [
-    { key: 'P', label: '🟢 基础阵容' },
-    { key: 'Q', label: '🔵 进阶阵容' },
-    { key: 'R', label: '🔴 挑战阵容' },
+    { keys: ['P'], label: '🟢 基础阵容' },
+    { keys: ['Q'], label: '🔵 进阶阵容' },
+    { keys: ['R'], label: '🔴 挑战阵容' },
   ],
-  // 5人局分组
+  // 5人局分组（参考《5人版指南》：基础6套/进阶6套/挑战5套）
   5: [
-    { key: 'M', label: '⚪ 中等难度' },
-    { key: 'V', label: '🟣 村庄向/特殊' },
+    { keys: ['M'], label: '🟢 基础阵容' },                 // M1-M6
+    { keys: ['A','B','C','D','E','F'], label: '🔵 进阶阵容' }, // A-F 共6套
+    { keys: ['V'], label: '🔴 挑战阵容' },                 // V1-V5
   ],
 };
 function renderReco(capacity, currentId, customActive) {
@@ -202,7 +211,7 @@ function renderReco(capacity, currentId, customActive) {
   // 按前缀分组
   const grouped = groups.map(g => ({
     ...g,
-    presets: allPresets.filter(p => p.id.startsWith(g.key)),
+    presets: allPresets.filter(p => g.keys.some(k => p.id.startsWith(k))),
   })).filter(g => g.presets.length > 0);
 
   if (grouped.length === 0 || allPresets.length === 0) {

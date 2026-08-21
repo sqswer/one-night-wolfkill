@@ -123,14 +123,20 @@ function genCode() {
 }
 function genToken() { return crypto.randomBytes(16).toString('hex'); }
 
-function makeRoom(hostName) {
+// 按人数返回该人数对应的首个推荐预设 ID（4人→P1、5人→M1；3/6/7人无预设返回 null）
+function defaultPresetFor(capacity) {
+  const p = PRESETS.find(x => x.forCount === capacity);
+  return p ? p.id : null;
+}
+
+function makeRoom(hostName, capacity = 5) {
   const code = genCode();
   const room = {
     code,
     hostToken: null,
     players: [],            // {token, name, seat, connected, ready}
-    presetId: 'M1',
-    capacity: 5,            // 创建时选定的本局人数上限（3-7）
+    presetId: defaultPresetFor(capacity) || 'M1',
+    capacity,               // 创建时选定的本局人数上限（3-7）
     roleDeck: null,         // 房主自选身份牌列表（覆盖 presetId）；null 时用 presetId
     phase: 'lobby',         // lobby | dusk | night | day | vote | result
     log: [],                // 公共日志
@@ -1128,8 +1134,7 @@ const server = http.createServer((req, res) => {
       let name = '玩家', capacity = 5;
       try { const o = JSON.parse(body); name = (o.name || '玩家').toString().slice(0, 16); capacity = Number(o.capacity) || 5; } catch (_) {}
       if (capacity < 3 || capacity > 7) capacity = 5;
-      const room = makeRoom(name);
-      room.capacity = capacity;
+      const room = makeRoom(name, capacity);
       const token = genToken();
       room.hostToken = token;
       room.players.push({ token, name, seat: 0, connected: true, ready: false });
