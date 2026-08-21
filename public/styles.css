@@ -167,6 +167,25 @@ select { appearance: none; -webkit-appearance: none; padding-right: 38px; }
 .reco-card.sel { border-color: var(--accent); background: rgba(124,139,255,.14); }
 .reco-name { display: block; font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 3px; }
 .reco-cards { display: block; font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+/* 折叠分组 */
+.reco-group { margin-bottom: 8px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--surface); }
+.reco-group-head {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: var(--surface-2); border: none; cursor: pointer;
+  padding: 10px 14px; font-size: 13.5px; font-weight: 700; color: var(--text);
+  transition: background .15s; -webkit-user-select: none; user-select: none;
+}
+.reco-group-head:active { background: rgba(255,255,255,.06); }
+.reco-group-label { flex: 1; text-align: left; }
+.reco-group-count { font-size: 11.5px; color: var(--muted); font-weight: 500; }
+.reco-group-toggle { font-size: 16px; color: var(--accent); width: 22px; text-align: center; flex-shrink: 0; }
+.reco-group-body {
+  display: grid; grid-template-columns: 1fr;
+  padding: 0; max-height: 0; overflow: hidden;
+  transition: max-height .3s ease, padding .3s ease;
+}
+.reco-group-body.open { max-height: 600px; padding: 6px 10px 10px; }
+.reco-group-body .reco-card { margin: 5px 0; padding: 9px 11px; }
 .custom-wrap { margin: 10px 0 4px; }
 .role-check-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px 8px; margin: 6px 0 10px; }
 .role-check { display: flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--text);
@@ -306,9 +325,12 @@ select { appearance: none; -webkit-appearance: none; padding-right: 38px; }
   background: linear-gradient(180deg, var(--bg-2), var(--bg-1)); border: 1px solid var(--line-strong);
   border-radius: 22px 22px 0 0; box-shadow: 0 -20px 60px rgba(0,0,0,.55); overflow: hidden; animation: slideUp .3s cubic-bezier(.2,.7,.3,1); }
 @keyframes slideUp { from { transform: translateY(100%); } to { transform: none; } }
+/* 头部区（标题+标签）固定不滚，内容区滚动 */
+.codex-header { flex-shrink: 0; background: linear-gradient(180deg, var(--bg-2), var(--bg-1)); position: relative; z-index: 2; }
 .codex-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px 10px; }
 .codex-head h2 { margin: 0; font-size: 19px; font-weight: 800; letter-spacing: 1px; }
-.codex-tabs { display: flex; gap: 8px; padding: 4px 18px 12px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.codex-tabs { display: flex; gap: 8px; padding: 4px 18px 12px; overflow-x: auto; -webkit-overflow-scrolling: touch;
+  background: linear-gradient(180deg, var(--bg-2) 60%, transparent); position: relative; z-index: 2; }
 .codex-tab { flex: none; padding: 8px 14px; border-radius: 999px; font-size: 13px; font-weight: 600; cursor: pointer;
   background: var(--surface); border: 1px solid var(--line); color: var(--muted); transition: .18s; -webkit-user-select: none; user-select: none; }
 .codex-tab.active { background: var(--surface-2); color: var(--text); border-color: var(--line-strong); }

@@ -172,21 +172,78 @@ function renderLobby(s) {
   }
 }
 
-// 推荐阵容卡片（按牌堆大小 = 人数 + 3 过滤，确保中央固定 3 张）
+// 推荐阵容卡片（4/5 人显示折叠分组；3/6/7 人隐藏，只留自选）
+const RECO_GROUPS = {
+  // 4人局分组
+  4: [
+    { key: 'P', label: '🟢 基础阵容' },
+    { key: 'Q', label: '🔵 进阶阵容' },
+    { key: 'R', label: '🔴 挑战阵容' },
+  ],
+  // 5人局分组
+  5: [
+    { key: 'M', label: '⚪ 中等难度' },
+    { key: 'V', label: '🟣 村庄向/特殊' },
+  ],
+};
 function renderReco(capacity, currentId, customActive) {
   const wrap = $('#reco-wrap');
+  // 3/6/7 人局：不显示推荐阵容
+  if (!RECO_GROUPS[capacity]) {
+    wrap.innerHTML = '';
+    wrap.classList.add('hidden');
+    return;
+  }
+  wrap.classList.remove('hidden');
   const expectedCards = capacity + 3;
-  const pick = PRESETS_CACHE.filter(p => p.cards.length === expectedCards);
-  // 无匹配预设时提示自选
-  if (pick.length === 0) {
+  const groups = RECO_GROUPS[capacity];
+  const allPresets = PRESETS_CACHE.filter(p => p.cards.length === expectedCards);
+
+  // 按前缀分组
+  const grouped = groups.map(g => ({
+    ...g,
+    presets: allPresets.filter(p => p.id.startsWith(g.key)),
+  })).filter(g => g.presets.length > 0);
+
+  if (grouped.length === 0 || allPresets.length === 0) {
     wrap.innerHTML = `<div class="reco-title">${capacity} 人局暂无推荐阵容，请使用下方「自选角色」配置 ${expectedCards} 张身份牌</div>`;
     return;
   }
+
   const title = `推荐阵容（${capacity} 人 · ${expectedCards} 张牌）`;
-  wrap.innerHTML = `<div class="reco-title">${title}</div>` + pick.map(p => {
-    const sel = (p.id === currentId && !customActive) ? ' sel' : '';
-    return `<button class="reco-card${sel}" data-id="${p.id}"><span class="reco-name">${escapeHtml(p.name)}</span><span class="reco-cards">${escapeHtml(p.cards.join('、'))}</span></button>`;
-  }).join('');
+  let html = `<div class="reco-title">${title}</div>`;
+  grouped.forEach(g => {
+    const gid = 'reco-g-' + g.key;
+    html += `<div class="reco-group">
+      <button class="reco-group-head" data-target="${gid}" aria-expanded="false">
+        <span class="reco-group-label">${g.label}</span>
+        <span class="reco-group-count">${g.presets.length} 套</span>
+        <span class="reco-group-toggle">＋</span>
+      </button>
+      <div class="reco-group-body" id="${gid}">
+        ${g.presets.map(p => {
+          const sel = (p.id === currentId && !customActive) ? ' sel' : '';
+          return `<button class="reco-card${sel}" data-id="${p.id}"><span class="reco-name">${escapeHtml(p.name)}</span><span class="reco-cards">${escapeHtml(p.cards.join('、'))}</span></button>`;
+        }).join('')}
+      </div>
+    </div>`;
+  });
+  wrap.innerHTML = html;
+
+  // 折叠/展开交互
+  wrap.querySelectorAll('.reco-group-head').forEach(btn => {
+    btn.onclick = () => {
+      const body = document.getElementById(btn.dataset.target);
+      const exp = btn.getAttribute('aria-expanded') === 'true';
+      btn.setAttribute('aria-expanded', String(!exp));
+      btn.querySelector('.reco-group-toggle').textContent = exp ? '＋' : '－';
+      body.classList.toggle('open', !exp);
+    };
+  });
+  // 默认全部折叠
+  wrap.querySelectorAll('.reco-group-body').forEach(b => b.classList.remove('open'));
+
+  // 点击选中预设
   wrap.querySelectorAll('.reco-card').forEach(b => b.onclick = () => {
     api('/api/action', { token: STATE.token, type: 'setPreset', payload: { presetId: b.dataset.id } });
   });
