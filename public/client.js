@@ -926,9 +926,9 @@ $$('.voice-toggle').forEach(b => b.onclick = toggleVoice);
 const CODEX_TEAMS = [
   { key: 'wolf', name: '狼队', cls: 'team-wolf' },
   { key: 'vampire', name: '吸血鬼队', cls: 'team-vampire' },
+  { key: 'village', name: '好人阵营', cls: 'team-village' },
   { key: 'tanner', name: '皮匠（独立）', cls: 'team-tanner' },
   { key: 'assassin', name: '刺客（独立）', cls: 'team-assassin' },
-  { key: 'village', name: '好人阵营', cls: 'team-village' },
 ];
 const PHASE_BADGE = {
   night: '🌙 夜晚', dusk: '🌆 黄昏', day: '☀️ 白天', none: '— 被动',
