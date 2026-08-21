@@ -1092,10 +1092,15 @@ function serveStatic(req, res, pathname) {
     const ext = path.extname(fp);
     const headers = { 'Content-Type': MIME[ext] || 'application/octet-stream' };
     if (ext === '.html') {
-      // 给页面内引用的 JS/CSS 注入内容哈希版本号，彻底规避平台层对静态文件的强缓存
+      // 将引用的 CSS/JS 内联进 HTML，把 4 次请求（HTML+3资源）压成 1 次，显著加快首屏；
+      // 同时整个应用只由 index.html 这一份 no-cache 文件承载，彻底规避平台层对单独 JS 的强缓存
+      // 导致的“更新后按钮失效 / 页面加载慢（多轮次代理延迟）”问题。源文件仍保持模块化，便于维护。
       let html = data.toString('utf8');
-      html = html.replace(/(src|href)="(\/[^"?]+\.(?:js|css))"/g, (m, attr, p) => {
-        return `${attr}="${p}?v=${fileHash(path.join(PUBLIC_DIR, p))}"`;
+      html = html.replace(/<link\b[^>]*\shref="(\/[^"]+\.css)"[^>]*>/g, (m, href) => {
+        try { const css = fs.readFileSync(path.join(PUBLIC_DIR, href), 'utf8'); return `<style>\n${css}\n</style>`; } catch (_) { return m; }
+      });
+      html = html.replace(/<script\b[^>]*\ssrc="(\/[^"]+\.js)"[^>]*><\/script>/g, (m, src) => {
+        try { const js = fs.readFileSync(path.join(PUBLIC_DIR, src), 'utf8').replace(/<\/script/gi, '<\\/script'); return `<script>\n${js}\n</script>`; } catch (_) { return m; }
       });
       data = Buffer.from(html, 'utf8');
       headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
