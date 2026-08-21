@@ -83,13 +83,27 @@ const PRESETS = [
   { id: 'V3', name: 'V3·刺客与爱神(进阶2)',    forCount: 5, cards: ['vampire','count','renfield','priest','sharpshooter','thief','cupid','assassin'], hasDusk: true },
   { id: 'V4', name: 'V4·标记混战(进阶3)',      forCount: 5, cards: ['vampire','count','renfield','priest','sharpshooter','thief','gremlin','drunk'], hasDusk: true },
   { id: 'V5', name: 'V5·狼血大战(史诗)',       forCount: 5, cards: ['werewolf','minion','vampire','renfield','priest','sharpshooter','robber','troublemaker'], hasDusk: true },
-  // ===== 6 人版（每局 9 张：6 玩家 + 3 中央）=====
-  { id: 'X1', name: 'X1·经典扩展(首推)',      forCount: 6, cards: ['werewolf','minion','seer','robber','troublemaker','insomniac','mason','mason','villager'],         hasDusk: false },
-  { id: 'X2', name: 'X2·双预言扩展',          forCount: 6, cards: ['werewolf','minion','seer','apprentice_seer','robber','troublemaker','drunk','insomniac','hunter'], hasDusk: false },
-  { id: 'X3', name: 'X3·女巫+保镖',           forCount: 6, cards: ['werewolf','minion','seer','witch','robber','troublemaker','insomniac','bodyguard','villager'], hasDusk: false },
-  { id: 'X4', name: 'X4·三阵营混战',          forCount: 6, cards: ['werewolf','minion','tanner','seer','robber','troublemaker','drunk','insomniac','hunter'],       hasDusk: false },
-  { id: 'Y1', name: 'Y1·吸血鬼扩展(简单)',    forCount: 6, cards: ['vampire','count','renfield','seer','robber','troublemaker','insomniac','sentinel','villager'],  hasDusk: true },
-  { id: 'Y2', name: 'Y2·狼血大战扩展',        forCount: 6, cards: ['werewolf','minion','vampire','renfield','priest','sharpshooter','robber','troublemaker','sentinel'], hasDusk: true },
+  // ===== 6 人版（每局 9 张：6 玩家 + 3 中央）参考《6人版指南》=====
+  // 基础阵容 X1-X6（无吸血鬼）
+  { id: 'X1', name: 'X1·新手友好·明察(首推)',      forCount: 6, cards: ['werewolf','minion','seer','robber','troublemaker','insomniac','mason','mason','villager'],                       hasDusk: false },
+  { id: 'X2', name: 'X2·双预言·信息局',           forCount: 6, cards: ['werewolf','minion','seer','apprentice_seer','robber','troublemaker','insomniac','drunk','villager'],           hasDusk: false },
+  { id: 'X3', name: 'X3·女巫搅局(破晓1)',         forCount: 6, cards: ['werewolf','minion','seer','witch','robber','troublemaker','insomniac','sentinel','villager'],                 hasDusk: false },
+  { id: 'X4', name: 'X4·灵异侦探局(破晓1)',       forCount: 6, cards: ['werewolf','minion','seer','paranormal_detective','robber','troublemaker','insomniac','mason','mason'],       hasDusk: false },
+  { id: 'X5', name: 'X5·保镖守护(破晓1)',         forCount: 6, cards: ['werewolf','minion','seer','robber','troublemaker','drunk','insomniac','bodyguard','villager'],               hasDusk: false },
+  { id: 'X6', name: 'X6·基础纯净局(仅基础)',      forCount: 6, cards: ['werewolf','minion','seer','robber','troublemaker','drunk','insomniac','hunter','villager'],                  hasDusk: false },
+  // 进阶阵容 Y1-Y6（无吸血鬼 · 破晓/机制堆叠）
+  { id: 'Y1', name: 'Y1·狼先知控场局(破晓1)',     forCount: 6, cards: ['werewolf','minion','seer','wolf_seer','drunk','witch','robber','insomniac','troublemaker'],                 hasDusk: false },
+  { id: 'Y2', name: 'Y2·化身幽灵 chaos',          forCount: 6, cards: ['doppelganger','werewolf','minion','seer','robber','witch','troublemaker','insomniac','drunk'],              hasDusk: false },
+  { id: 'Y3', name: 'Y3·皮匠搅局(三阵营)',        forCount: 6, cards: ['werewolf','minion','tanner','seer','robber','troublemaker','drunk','insomniac','witch'],                   hasDusk: false },
+  { id: 'Y4', name: 'Y4·破晓重度(阿尔法+哨兵)',   forCount: 6, cards: ['alpha_wolf','werewolf','minion','seer','witch','insomniac','sentinel','robber','paranormal_detective'],   hasDusk: false },
+  { id: 'Y5', name: 'Y5·王子与被诅咒者(破晓2)',   forCount: 6, cards: ['werewolf','minion','prince','cursed','seer','robber','troublemaker','insomniac','witch'],                 hasDusk: false },
+  { id: 'Y6', name: 'Y6·村庄白痴进阶(破晓)',      forCount: 6, cards: ['werewolf','minion','seer','robber','troublemaker','village_idiot','tracker','witch','insomniac'],          hasDusk: false },
+  // 挑战阵容 U1-U5（吸血鬼扩展 · 含黄昏）
+  { id: 'U1', name: 'U1·吸血鬼入门(简单)',        forCount: 6, cards: ['vampire','renfield','sentinel','insomniac','seer','robber','troublemaker','villager','witch'],            hasDusk: true },
+  { id: 'U2', name: 'U2·吸血鬼标准平替(进阶1)',   forCount: 6, cards: ['vampire','count','renfield','priest','sharpshooter','robber','troublemaker','sentinel','villager'],       hasDusk: true },
+  { id: 'U3', name: 'U3·爱神与刺客(进阶2)',       forCount: 6, cards: ['vampire','count','renfield','priest','sharpshooter','thief','cupid','assassin','robber'],               hasDusk: true },
+  { id: 'U4', name: 'U4·标记混战(进阶3)',         forCount: 6, cards: ['vampire','count','renfield','priest','sharpshooter','thief','gremlin','robber','troublemaker'],          hasDusk: true },
+  { id: 'U5', name: 'U5·狼血大战(史诗)',          forCount: 6, cards: ['vampire','renfield','werewolf','minion','priest','sharpshooter','robber','troublemaker','insomniac'],    hasDusk: true },
   // ===== 7 人版（每局 10 张：7 玩家 + 3 中央）=====
   { id: 'Z1', name: 'Z1·满员经典(首推)',       forCount: 7, cards: ['werewolf','minion','seer','robber','troublemaker','insomniac','mason','mason','drunk','villager'],     hasDusk: false },
   { id: 'Z2', name: 'Z2·全员能力',             forCount: 7, cards: ['werewolf','minion','seer','witch','robber','troublemaker','drunk','insomniac','hunter','bodyguard'], hasDusk: false },

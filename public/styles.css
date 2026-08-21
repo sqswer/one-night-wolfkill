@@ -119,7 +119,7 @@ select { appearance: none; -webkit-appearance: none; padding-right: 38px; }
   background: linear-gradient(180deg, var(--bg-1) 72%, transparent); }
 .room-id { display: flex; flex-direction: column; line-height: 1.2; }
 .room-id-label { font-size: 11px; color: var(--muted); letter-spacing: 2px; }
-.room-id-value { font-size: 26px; font-weight: 800; letter-spacing: 6px; color: var(--accent-2); }
+.room-id-value { font-size: 26px; font-weight: 800; letter-spacing: 6px; color: var(--accent-2); cursor: pointer; user-select: text; -webkit-user-select: text; }
 .phase { display: inline-flex; align-items: center; gap: 8px; background: var(--surface-2);
   border: 1px solid var(--line); padding: 7px 14px; border-radius: 999px; font-size: 13px; font-weight: 600; }
 .phase .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-2); box-shadow: 0 0 10px var(--accent-2); }

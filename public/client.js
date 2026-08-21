@@ -194,6 +194,12 @@ const RECO_GROUPS = {
     { keys: ['A','B','C','D','E','F'], label: '🔵 进阶阵容' }, // A-F 共6套
     { keys: ['V'], label: '🔴 挑战阵容' },                 // V1-V5
   ],
+  // 6人局分组（参考《6人版指南》：基础6套/进阶6套/挑战5套，共17套）
+  6: [
+    { keys: ['X'], label: '🟢 基础阵容' },                 // X1-X6
+    { keys: ['Y'], label: '🔵 进阶阵容' },                 // Y1-Y6
+    { keys: ['U'], label: '🔴 挑战阵容' },                 // U1-U5（吸血鬼）
+  ],
 };
 function renderReco(capacity, currentId, customActive) {
   const wrap = $('#reco-wrap');
@@ -317,11 +323,50 @@ $('#btn-apply-custom').onclick = () => {
     else toast(`已应用自选阵容（${customRoles.size} 张）`);
   });
 };
-$('#btn-copy').onclick = () => {
+// 复制文本：优先用 Clipboard API（需安全上下文），否则回退到 textarea + execCommand
+function copyText(text) {
+  return new Promise((resolve, reject) => {
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(resolve).catch(() => fallbackCopy(text, resolve, reject));
+    } else {
+      fallbackCopy(text, resolve, reject);
+    }
+  });
+}
+function fallbackCopy(text, resolve, reject) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    ta.style.opacity = '0';
+    ta.style.fontSize = '16px'; // 避免 iOS 缩放
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    ok ? resolve() : reject(new Error('execCommand failed'));
+  } catch (e) { reject(e); }
+}
+
+$('#btn-copy').onclick = async () => {
   const link = `${location.origin}/?code=${STATE.code}`;
   const text = `【一夜狼人杀】房间号 ${STATE.code}\n快来玩：${link}`;
-  if (navigator.clipboard) navigator.clipboard.writeText(text).then(() => toast('邀请已复制')).catch(() => toast('复制失败，手动复制房间号'));
-  else toast('房间号：' + STATE.code);
+  try {
+    await copyText(text);
+    toast('邀请已复制 ✓');
+  } catch (e) {
+    toast('复制失败，请长按房间号手动复制：' + STATE.code);
+  }
+};
+// 点击房间号也可直接复制，并支持长按手动选择
+$('#lobby-code').onclick = async () => {
+  if (!STATE.code) return;
+  try { await copyText(STATE.code); toast('房间号已复制：' + STATE.code); }
+  catch (e) { toast('请长按房间号手动复制：' + STATE.code); }
 };
 
 // --------------------------- 游戏渲染 ---------------------------
