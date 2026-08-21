@@ -308,7 +308,7 @@ function buildRoleCheckGrid() {
         <div class="role-step-ctrl">
           <button type="button" class="step-btn" data-act="dec" aria-label="减少">−</button>
           <span class="step-count">0</span>
-          <button type="button" class="step-btn" data-act="inc" aria-label="增加">＋</button>
+          <button type="button" class="step-btn" data-act="inc" aria-label="增加">+</button>
         </div>
       </div>`;
     }).join('');

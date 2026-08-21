@@ -204,8 +204,9 @@ select { appearance: none; -webkit-appearance: none; padding-right: 38px; }
 .role-step-name { font-size: 13.5px; color: var(--text); font-weight: 600; display: flex; align-items: center; gap: 6px; }
 .role-step-multi { font-style: normal; font-size: 10.5px; color: var(--accent-2); font-weight: 700; }
 .role-step-ctrl { display: flex; align-items: center; gap: 8px; }
-.step-btn { width: 28px; height: 28px; border-radius: 8px; border: 1px solid var(--line);
-  background: var(--surface); color: var(--text); font-size: 16px; line-height: 1; cursor: pointer; flex: none; }
+.step-btn { width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--surface); color: var(--text); font-size: 18px; line-height: 1; cursor: pointer; flex: none;
+  display: flex; align-items: center; justify-content: center; padding: 0; user-select: none; -webkit-user-select: none; }
 .step-btn:active { transform: scale(.94); }
 .step-count { min-width: 18px; text-align: center; font-size: 15px; font-weight: 700; color: var(--text); }
 .role-step.on .step-count { color: var(--accent-2); }
