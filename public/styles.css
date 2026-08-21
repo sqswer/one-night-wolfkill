@@ -297,6 +297,8 @@ select { appearance: none; -webkit-appearance: none; padding-right: 38px; }
 .vote-item:active { transform: scale(.97); }
 .vote-item.sel { border-color: var(--wolf); background: rgba(255,107,129,.16); color: #fff; }
 .vote-item.me { opacity: .4; pointer-events: none; }
+.vote-skip { border-style: dashed; color: var(--muted); background: transparent; }
+.vote-skip.sel { border-color: var(--village); background: rgba(120,224,143,.16); color: #fff; }
 .vote-status { font-size: 13px; color: var(--muted); }
 
 /* ---------- 结果 ---------- */

@@ -251,7 +251,13 @@ function buildState(room, player) {
   }
   let votesView = null;
   if (room.phase === 'vote' || room.phase === 'result') {
-    votesView = { mine: room.votes[player.seat] ?? null, total: room.players.length, cast: Object.keys(room.votes).length };
+    const mine = room.votes[player.seat] ?? undefined;
+    votesView = {
+      mine,
+      abstained: mine === null,          // 本玩家已选择「不投票」
+      total: room.players.length,
+      cast: Object.keys(room.votes).length,
+    };
   }
   const state = {
     code: room.code,
@@ -813,7 +819,7 @@ function startVote(room) {
   room.votes = {};
   room.voteTargetsOpen = true;
   room.discussionEndsAt = null;
-  announce(room, '发言结束，现在开始投票。请所有人投票（不可投自己）。');
+  announce(room, '发言结束，现在开始投票。投给你怀疑的人（不可投自己），也可选择「不投票」。若所有人都没投出有效票，则无人被放逐。');
   publicLog(room, '进入投票阶段。');
   // 保镖保护行动（机器人保镖自动保护，真人保镖由 UI 选择）
   const bodyguards = room.players.filter(p => room.currentRole[p.seat] === 'bodyguard');
@@ -841,6 +847,8 @@ function scheduleBotVotes(room) {
     setTimeout(() => {
       if (room.phase !== 'vote') return;            // 已结算则跳过
       if (room.votes[p.seat] != null) return;        // 已投则跳过
+      // 约 15% 概率选择「不投票」（模拟无辜玩家不愿滥投）
+      if (Math.random() < 0.15) { handleVote(room, p.token, null); return; }
       const target = randOther(room, p.seat);
       handleVote(room, p.token, target);
     }, 1000 + i * 650);
@@ -851,11 +859,18 @@ function handleVote(room, token, target) {
   const p = findPlayer(room, token);
   if (!p) return { error: '未知玩家' };
   if (room.phase !== 'vote') return { error: '当前不在投票阶段' };
+  // target === null 表示「不投票（弃票）」
+  if (target === null) {
+    room.votes[p.seat] = null;
+    pushState(room);
+    if (Object.keys(room.votes).length >= room.players.length) finalizeVote(room);
+    return { ok: true };
+  }
   if (target === p.seat) return { error: '不能投自己' };
   if (target < 0 || target >= room.players.length) return { error: '目标无效' };
   room.votes[p.seat] = target;
   pushState(room);
-  // 所有人都投了 -> 结算
+  // 所有人都做了选择（含弃票）-> 结算
   if (Object.keys(room.votes).length >= room.players.length) {
     finalizeVote(room);
   }

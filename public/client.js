@@ -647,7 +647,23 @@ function renderVote(s) {
     };
     list.appendChild(el);
   });
-  $('#vote-status').textContent = `已投 ${s.votes?.cast || 0} / ${s.players.length}`;
+  // 「不投票」选项
+  const skip = document.createElement('div');
+  skip.className = 'vote-item vote-skip';
+  skip.textContent = '🚫 不投票';
+  skip.onclick = () => {
+    $$('#vote-list .vote-item').forEach(x => x.classList.remove('sel')); skip.classList.add('sel');
+    api('/api/action', { token: STATE.token, type: 'vote', payload: { target: null } });
+  };
+  list.appendChild(skip);
+  // 已投状态：区分「投了某人」与「已弃票」
+  const mine = s.votes?.mine;
+  if (s.votes && (mine !== undefined)) {
+    if (s.votes.abstained) $('#vote-status').textContent = `你已选择「不投票」 · 已投 ${s.votes.cast} / ${s.players.length}`;
+    else $('#vote-status').textContent = `你已投给 ${s.players.find(x => x.seat === mine)?.name || '?'} · 已投 ${s.votes.cast} / ${s.players.length}`;
+  } else {
+    $('#vote-status').textContent = `已投 ${s.votes?.cast || 0} / ${s.players.length}`;
+  }
 }
 $('#btn-start-vote').onclick = () => api('/api/action', { token: STATE.token, type: 'startVote' });
 
