@@ -267,17 +267,77 @@ function renderReco(capacity, currentId, customActive) {
   });
 }
 
-// 自选角色复选网格（只构建一次）
-let customRoles = new Set();
+// 自选角色网格（按扩展分组：基础 → 破晓 → 吸血鬼；支持重复选牌）
+const ROLE_PACKS = {
+  // 基础
+  werewolf: 'base', minion: 'base', mason: 'base', seer: 'base', robber: 'base',
+  troublemaker: 'base', drunk: 'base', insomniac: 'base', hunter: 'base', tanner: 'base',
+  villager: 'base', doppelganger: 'base',
+  // 破晓扩展
+  alpha_wolf: 'daybreak', wolf_seer: 'daybreak', apprentice_seer: 'daybreak',
+  paranormal_detective: 'daybreak', witch: 'daybreak', village_idiot: 'daybreak',
+  sentinel: 'daybreak', revealer: 'daybreak', bodyguard: 'daybreak', prince: 'daybreak',
+  cursed: 'daybreak', tracker: 'daybreak',
+  // 吸血鬼扩展
+  vampire: 'vampire', count: 'vampire', renfield: 'vampire', priest: 'vampire',
+  sharpshooter: 'vampire', thief: 'vampire', gremlin: 'vampire', cupid: 'vampire', assassin: 'vampire',
+};
+const PACK_ORDER = ['base', 'daybreak', 'vampire'];
+const PACK_LABEL = { base: '🟢 基础', daybreak: '🔵 破晓扩展', vampire: '🔴 吸血鬼扩展' };
+const ROLE_MAX = { werewolf: 2, mason: 2, villager: 3, vampire: 2 }; // 其余角色默认最多 1 张
+
+let customRoles = {}; // key -> 张数
+function roleMax(key) { return ROLE_MAX[key] || 1; }
+function customTotal() { return Object.values(customRoles).reduce((a, b) => a + b, 0); }
+
 function buildRoleCheckGrid() {
   const grid = $('#role-check-grid');
   if (grid.dataset.built) return;
   const lib = window.ROLE_LIB || [];
-  grid.innerHTML = lib.map(r => `<label class="role-check"><input type="checkbox" value="${r.key}" /> ${escapeHtml(r.name)}</label>`).join('') + '<div id="custom-count" class="custom-count"></div>';
+  const idx = k => PACK_ORDER.indexOf(ROLE_PACKS[k] || 'base');
+  const ordered = [...lib].sort((a, b) => idx(a.key) - idx(b.key));
+  let html = '';
+  for (const pack of PACK_ORDER) {
+    const roles = ordered.filter(r => (ROLE_PACKS[r.key] || 'base') === pack);
+    if (!roles.length) continue;
+    html += `<div class="role-pack-head">${PACK_LABEL[pack]}</div>`;
+    html += roles.map(r => {
+      const mx = roleMax(r.key);
+      return `<div class="role-step" data-key="${r.key}" data-max="${mx}">
+        <span class="role-step-name">${escapeHtml(r.name)}${mx > 1 ? `<i class="role-step-multi">×${mx}</i>` : ''}</span>
+        <div class="role-step-ctrl">
+          <button type="button" class="step-btn" data-act="dec" aria-label="减少">−</button>
+          <span class="step-count">0</span>
+          <button type="button" class="step-btn" data-act="inc" aria-label="增加">＋</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+  html += '<div id="custom-count" class="custom-count"></div>';
+  grid.innerHTML = html;
   grid.dataset.built = '1';
-  grid.querySelectorAll('input').forEach(cb => cb.onchange = () => {
-    if (cb.checked) customRoles.add(cb.value); else customRoles.delete(cb.value);
-    updateCustomCount();
+  grid.querySelectorAll('.role-step').forEach(row => {
+    const key = row.dataset.key;
+    const max = Number(row.dataset.max);
+    const name = (window.ROLE_MAP && window.ROLE_MAP[key]) ? window.ROLE_MAP[key].name : key;
+    const countEl = row.querySelector('.step-count');
+    const refresh = () => {
+      const c = customRoles[key] || 0;
+      countEl.textContent = c;
+      row.classList.toggle('on', c > 0);
+    };
+    row.querySelector('[data-act="inc"]').onclick = () => {
+      const c = customRoles[key] || 0;
+      if (c >= max) { toast(`「${name}」最多 ${max} 张`); return; }
+      customRoles[key] = c + 1;
+      refresh(); updateCustomCount();
+    };
+    row.querySelector('[data-act="dec"]').onclick = () => {
+      const c = customRoles[key] || 0;
+      if (c <= 0) return;
+      if (c - 1 === 0) delete customRoles[key]; else customRoles[key] = c - 1;
+      refresh(); updateCustomCount();
+    };
   });
 }
 function updateCustomCount() {
@@ -285,9 +345,10 @@ function updateCustomCount() {
   if (!el) return;
   const cap = STATE.data && STATE.data.capacity || 5;
   const need = cap + 3;
-  const ok = customRoles.size === need;
-  el.textContent = `已选 ${customRoles.size} / 需要 ${need} 张`;
-  el.className = 'custom-count' + (ok ? ' ok' : (customRoles.size > need ? ' over' : ''));
+  const total = customTotal();
+  const ok = total === need;
+  el.textContent = `已选 ${total} / 需要 ${need} 张`;
+  el.className = 'custom-count' + (ok ? ' ok' : (total > need ? ' over' : ''));
 }
 
 // 准备按钮高亮状态
@@ -319,12 +380,12 @@ $('#btn-add-bot').onclick = () => api('/api/action', { token: STATE.token, type:
 $('#btn-fill-bots').onclick = () => api('/api/action', { token: STATE.token, type: 'addBot', payload: { fill: true } });
 $('#btn-custom-toggle').onclick = () => { buildRoleCheckGrid(); $('#custom-wrap').classList.toggle('hidden'); };
 $('#btn-apply-custom').onclick = () => {
-  const cap = STATE.data && STATE.data.capacity || 5;
-  const need = cap + 3;
-  if (customRoles.size < 3) return toast('至少勾选 3 个角色');
-  api('/api/action', { token: STATE.token, type: 'setCustom', payload: { roles: [...customRoles] } }).then(r => {
+  const total = customTotal();
+  if (total < 3) return toast('至少选择 3 张牌');
+  const roles = Object.entries(customRoles).flatMap(([k, c]) => Array(c).fill(k));
+  api('/api/action', { token: STATE.token, type: 'setCustom', payload: { roles } }).then(r => {
     if (r.data && r.data.warning) toast(r.data.warning);
-    else toast(`已应用自选阵容（${customRoles.size} 张）`);
+    else toast(`已应用自选阵容（${total} 张）`);
   });
 };
 // 复制文本：优先用 Clipboard API（需安全上下文），否则回退到 textarea + execCommand

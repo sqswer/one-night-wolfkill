@@ -194,11 +194,22 @@ select { appearance: none; -webkit-appearance: none; padding-right: 38px; }
 .reco-group-body.open { max-height: 600px; padding: 6px 10px 10px; }
 .reco-group-body .reco-card { margin: 5px 0; padding: 9px 11px; }
 .custom-wrap { margin: 10px 0 4px; }
-.role-check-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px 8px; margin: 6px 0 10px; }
-.role-check { display: flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--text);
-  background: var(--surface-2); border: 1px solid var(--line); border-radius: 9px; padding: 7px 8px; cursor: pointer; }
-.role-check input { width: auto; margin: 0; accent-color: var(--accent); }
-.custom-count { grid-column: 1 / -1; text-align: center; font-size: 12.5px; color: var(--text-dim); padding: 4px 0; }
+.role-check-grid { display: flex; flex-direction: column; gap: 6px; margin: 6px 0 10px; }
+.role-pack-head { font-size: 12px; font-weight: 700; letter-spacing: 1px; color: var(--accent-2);
+  margin-top: 8px; padding: 6px 2px 2px; border-top: 1px dashed var(--line); }
+.role-pack-head:first-child { border-top: none; margin-top: 0; }
+.role-step { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 7px 10px; }
+.role-step.on { border-color: var(--accent); background: rgba(124,139,255,.12); }
+.role-step-name { font-size: 13.5px; color: var(--text); font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.role-step-multi { font-style: normal; font-size: 10.5px; color: var(--accent-2); font-weight: 700; }
+.role-step-ctrl { display: flex; align-items: center; gap: 8px; }
+.step-btn { width: 28px; height: 28px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--surface); color: var(--text); font-size: 16px; line-height: 1; cursor: pointer; flex: none; }
+.step-btn:active { transform: scale(.94); }
+.step-count { min-width: 18px; text-align: center; font-size: 15px; font-weight: 700; color: var(--text); }
+.role-step.on .step-count { color: var(--accent-2); }
+.custom-count { text-align: center; font-size: 12.5px; color: var(--text-dim); padding: 4px 0; }
 .custom-count.ok { color: var(--village); font-weight: 600; }
 .custom-count.over { color: var(--tanner); }
 
