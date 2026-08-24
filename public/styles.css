@@ -239,7 +239,9 @@ select { appearance: none; -webkit-appearance: none; padding-right: 38px; }
 .role-head { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; }
 .role-head-text { flex: 1; min-width: 0; }
 .role-team { font-size: 12px; color: var(--muted); letter-spacing: 1px; }
-.role-icon { display: block; width: 64px; height: 64px; border-radius: 16px; object-fit: cover; flex: none; border: 2px solid var(--line); background: rgba(255,255,255,.04); }
+.role-icon-wrap { position: relative; width: 64px; height: 64px; flex: none; }
+.role-icon { display: block; width: 64px; height: 64px; border-radius: 16px; object-fit: cover; border: 2px solid var(--line); background: rgba(255,255,255,.04); }
+.role-icon-fallback { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; width: 64px; height: 64px; border-radius: 16px; border: 2px solid var(--line); background: var(--surface-2); color: var(--text); font-size: 26px; font-weight: 800; }
 .role-mark { margin-top: 8px; font-size: 12px; color: var(--accent-2); }
 .role-name { font-size: 28px; font-weight: 800; margin: 2px 0 0; }
 .role-desc { font-size: 13px; color: var(--muted); line-height: 1.7; margin: 0 0 12px; text-align: left; }

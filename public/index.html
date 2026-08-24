@@ -114,7 +114,10 @@
     <!-- 身份卡 -->
     <div id="role-card" class="role-card hidden">
       <div class="role-head">
-        <img id="role-icon" class="role-icon" src="" alt="" onerror="this.style.display='none'" />
+        <div class="role-icon-wrap">
+          <img id="role-icon" class="role-icon" src="" alt="" referrerpolicy="no-referrer" />
+          <div id="role-icon-fallback" class="role-icon-fallback" style="display:none"></div>
+        </div>
         <div class="role-head-text">
           <div class="role-team" id="role-team"></div>
           <div class="role-name" id="role-name"></div>

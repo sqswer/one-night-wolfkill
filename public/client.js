@@ -457,7 +457,13 @@ function renderGame(s) {
     rc.classList.remove('hidden');
     $('#role-team').textContent = '阵营：' + tm.name;
     const iconEl = $('#role-icon');
-    if (iconEl) { iconEl.src = `assets/role-icons/${s.you.role.key}/icon.png`; iconEl.alt = s.you.role.name; }
+    if (iconEl) {
+      const key = s.you.role.key;
+      iconEl.onerror = () => { iconEl.style.display = 'none'; const fb = $('#role-icon-fallback'); if (fb) { fb.textContent = (s.you.role.name || '?')[0]; fb.style.display = 'flex'; } console.warn('[role-icon] 加载失败:', key); };
+      iconEl.onload = () => { const fb = $('#role-icon-fallback'); if (fb) fb.style.display = 'none'; };
+      iconEl.src = `/assets/role-icons/${key}/icon.png`;
+      iconEl.alt = s.you.role.name;
+    }
     $('#role-name').textContent = s.you.role.name;
     const rl = (window.ROLE_MAP && window.ROLE_MAP[s.you.role.key]) || null;
     $('#role-desc').textContent = rl ? rl.ability : (ROLE_DESC[s.you.role.key] || '');
