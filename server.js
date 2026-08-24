@@ -306,6 +306,12 @@ function twoDistinct(room, seat) {
   const x = a[rnd(a.length)]; let y; do { y = a[rnd(a.length)]; } while (y === x);
   return [x, y];
 }
+// 小魔怪专用：可包含自己的两人选择
+function twoDistinctWithSelf(room) {
+  const all = room.players.map((_, i) => i);
+  const x = all[rnd(all.length)]; let y; do { y = all[rnd(all.length)]; } while (y === x);
+  return [x, y];
+}
 function randCenter(room) { return rnd(room.centerCards.length); }
 function hasCenter(room) { return room.centerCards.length > 0; }
 
@@ -339,7 +345,7 @@ function botAutoSubmit(room, action, seat) {
     case 'assassin': return { target: randOther(room, seat) };
     case 'sharpshooter': return { roleTarget: randOther(room, seat), markTarget: randOther(room, seat) };
     case 'thief': return { target: randOther(room, seat) };
-    case 'gremlin': { const [a, b] = twoDistinct(room, seat); return { a, b, mode: Math.random() < 0.5 ? 'marks' : 'cards' }; }
+    case 'gremlin': { const [a, b] = twoDistinctWithSelf(room); return { a, b, mode: Math.random() < 0.5 ? 'marks' : 'cards' }; }
     case 'tracker': { const [a, b] = twoDistinct(room, seat); return { a, b }; }
     default: return {};
   }
@@ -621,9 +627,9 @@ function buildActionPrompt(room, action, seat) {
     case 'sentinel':
       return { ...base, type: 'shield', text: '哨兵：选择一张牌上盾封锁（本夜不可被查/换）。', players, centers };
     case 'alphaWolf':
-      return { ...base, type: 'alphaWolf', text: '阿尔法狼：将一张中央底牌（视为狼）与一名玩家交换。', players, centers };
+      return { ...base, type: 'alphaWolf', text: '阿尔法狼：将一张中央底牌与一名非狼、非自己的玩家交换（把中央牌塞入玩家堆）。', players, centers };
     case 'doppelganger':
-      return { ...base, type: 'seePlayer', text: '化身幽灵：查看一名玩家身份（简化版，仅查看）。', players };
+      return { ...base, type: 'seePlayer', text: '化身幽灵：查看一名玩家身份（原版复制其能力，本作简化为仅查看）。', players };
     case 'vampire':
       return { ...base, type: 'vampireMark', text: '吸血鬼：将吸血鬼标记放到一名非吸血鬼玩家面前（其变为吸血鬼队）。', players };
     case 'count':
@@ -639,11 +645,11 @@ function buildActionPrompt(room, action, seat) {
     case 'thief':
       return { ...base, type: 'thief', text: '小偷：与一名玩家交换状态标记，并查看你的新标记。', players };
     case 'gremlin':
-      return { ...base, type: 'gremlin', text: '小魔怪：交换两名玩家的角色牌，或交换两名玩家的状态标记（二选一）。', players };
+      return { ...base, type: 'gremlin', text: '小魔怪：盲交换任意两名玩家的角色牌或状态标记（可含自己，不看牌）。', players };
     case 'tracker':
-      return { ...base, type: 'tracker', text: '循迹者：查看两名玩家的身份牌，判断它们本夜是否被对调。', players };
+      return { ...base, type: 'tracker', text: '循迹者：查看哪些玩家在夜晚动过牌（本作简化为选两人判断是否对调）。', players };
     case 'bodyguard':
-      return { ...base, type: 'protect', text: '保镖：选择要保护的人（其本票不被放逐）。', players };
+      return { ...base, type: 'protect', text: '保镖：选择保护目标（其获最高票时不会被放逐，由次高票≥2票者替死）。', players };
     default:
       return { ...base, type: 'none', text: r.name };
   }
@@ -688,8 +694,15 @@ function applyAction(room, action, subs) {
     }
   } else if (r === 'paranormal_detective') {
     const s = action.seats[0]; const targets = subs[s].targets || [];
-    const names = targets.map(t => `${seatName(room, t)}→${ROLES[room.currentRole[t]].name}`);
-    sendPrivate(room, room.players[s].token, `灵异侦探：${names.join('；') || '（未查看）'}。`);
+    const results = targets.map(t => ({ seat: t, role: room.currentRole[t] }));
+    const names = results.map(x => `${seatName(room, x.seat)}→${ROLES[x.role].name}`);
+    // 检查是否看到狼人或皮匠（官方规则：变阵营）
+    const sawWolf = results.find(x => x.role === 'werewolf' || x.role === 'alpha_wolf' || x.role === 'wolf_seer');
+    const sawTanner = results.find(x => x.role === 'tanner');
+    let extra = '';
+    if (sawWolf) extra = ' ⚠️ 你看到了狼人——你已加入狼人阵营！';
+    if (sawTanner) extra = ' ⚠️ 你看到了皮匠——你已变成皮匠！';
+    sendPrivate(room, room.players[s].token, `灵异侦探：${names.join('；') || '（未查看）'}。${extra}`);
   } else if (r === 'wolfSeer' || r === 'doppelganger') {
     const s = action.seats[0]; const t = subs[s].target;
     if (t != null) sendPrivate(room, room.players[s].token, `你查看 ${seatName(room, t)} 的身份是【${ROLES[room.currentRole[t]].name}】。`);
@@ -960,10 +973,22 @@ function applyOutModifiers(room, top) {
     }
   }
   let out = new Set(list);
-  // 保镖保护
+  // 保镖保护：被保护者不被放逐；若其获最高票，则次高票（≥2票）替死
   if (room.protectTarget != null && out.has(room.protectTarget)) {
     out.delete(room.protectTarget);
     publicLog(room, `保镖保护了 ${seatName(room, room.protectTarget)}，其不被放逐。`);
+    // 若出局列表为空（被保护者是唯一最高票），顺延到次高票（需至少2票）
+    if (out.size === 0) {
+      const counts = {};
+      for (const seat in room.votes) { const t = room.votes[seat]; if (t != null) counts[t] = (counts[t] || 0) + 1; }
+      const sorted = Object.keys(counts).map(Number).filter(s => s !== room.protectTarget).sort((a, b) => counts[b] - counts[a]);
+      if (sorted.length > 0 && counts[sorted[0]] >= 2) {
+        out.add(sorted[0]);
+        publicLog(room, `保镖替死：${seatName(room, room.protectTarget)} 被保，${seatName(room, sorted[0])}（${counts[sorted[0]]}票）被放逐。`);
+      } else {
+        publicLog(room, '保镖保护了最高票玩家，且次高票不足2票——无人被放逐。');
+      }
+    }
   }
   // 爱之标记同生共死
   if (room.lovePair) {

@@ -31,22 +31,22 @@ const TEAM_META = {
 const ROLE_DESC = {
   werewolf: '夜晚与同伴互认；若只有你一只狼，可查看一张中央底牌。',
   minion: '狼队的帮手，知道谁是狼人（狼也可能在中央）。',
-  alpha_wolf: '将一张中央底牌换给一名玩家，把该底牌伪装成狼。',
+  alpha_wolf: '将一张中央的狼人身份牌与一名非狼玩家交换（不能换给自己或狼人）。',
   wolf_seer: '查看一名玩家的真实身份。',
   mason: '与另一名守夜人互认，确定你的同伴。',
   seer: '查看一名玩家，或查看两张中央底牌的身份。',
   apprentice_seer: '查看一张中央底牌的身份。',
-  paranormal_detective: '最多查看 2 名玩家的身份。',
+  paranormal_detective: '查看最多2名玩家；看到狼人则变狼，看到皮匠则变皮匠。',
   robber: '与一名玩家交换身份，并查看换来的新身份。',
   witch: '查看一张中央底牌，并可选与一名玩家交换身份。',
   troublemaker: '悄悄交换另外两名玩家的身份（自己不变）。',
   village_idiot: '轮转所有其他玩家的身份牌（自己不变）。',
   drunk: '被迫与一张中央底牌随机交换身份。',
   insomniac: '天亮前查看自己最终的身份。',
-  sentinel: '选择一张牌（玩家或中央）上盾，本夜不可被查/换。',
-  doppelganger: '查看一名玩家的身份（简化版）。',
+  sentinel: '给任意玩家或中央底牌上盾，被盾保护的牌本夜不可被查/换/移动。',
+  doppelganger: '查看一名玩家身份并复制其角色能力（原版规则，本作简化为仅查看）。',
   revealer: '揭示一名玩家的身份（信息类）。',
-  bodyguard: '投票前选择保护一人，其本票不被放逐。',
+  bodyguard: '投票时保护一人：其获最高票则次高票者（≥2票）被放逐。',
   hunter: '被放逐时可开枪带走一名玩家。',
   villager: '普通村民，没有特殊能力。',
   tanner: '只想被放逐；若你被放逐且无狼死亡，你独赢。',
@@ -54,14 +54,14 @@ const ROLE_DESC = {
   cursed: '若被狼人标记则变成狼。',
   vampire: '黄昏阶段把吸血鬼标记放到一名玩家面前，其变为吸血鬼。',
   count: '黄昏阶段对一名玩家施加恐惧封锁。',
-  renfield: '知道谁是吸血鬼。',
+  renfield: '用蝙蝠标记交换原始标记；无吸血鬼死则血奴胜。',
   priest: '黄昏给自己放清白标记，可再净化一名玩家的标记。',
   sharpshooter: '夜晚查一名玩家身份，并查另一名玩家的状态标记。',
   thief: '夜晚将一名玩家的状态标记换到自己面前并查看。',
-  gremlin: '夜晚交换两名玩家的角色牌，或交换两名玩家的状态标记。',
+  gremlin: '盲交换任意两人的角色牌或状态标记（可含自己）。',
   cupid: '黄昏给两名玩家放爱之标记，令二人同生共死。',
   assassin: '黄昏给一名玩家放刺杀标记；该玩家死亡时你获胜。',
-  tracker: '夜晚查看任意两名玩家身份牌是否本夜被对调。',
+  tracker: '看谁在夜晚动过牌（举拇指），识破换牌角色。',
 };
 
 // --------------------------- 工具 ---------------------------
@@ -788,36 +788,71 @@ async function toggleMic() {
 }
 function stopMic() { if (micRec) micRec.stop(); recording = false; $('#btn-mic').classList.remove('recording'); }
 
-// --------------------------- AI 播报员（TTS） ---------------------------
-function speakAnnounce(text) {
-  if (!ttsOn || !text) return;
-  if (!('speechSynthesis' in window)) return;
+// --------------------------- AI 播报员（TTS）—— 队列化 + 语音预缓存 ---------------------------
+let _ttsVoices = [];          // 缓存的语音列表（onvoiceschanged 时更新）
+let _ttsReady = false;         // 语音列表是否已加载
+let _ttsZhVoice = null;        // 缓存的中文语音
+let _ttsQueue = [];            // 待播报队列
+let _ttsDraining = false;      // 是否正在逐条播报
+
+function _ttsLoadVoices() {
   try {
-    speechSynthesis.resume();           // 唤醒可能被挂起的合成器
-    if (speechSynthesis.speaking) speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = 'zh-CN'; u.rate = 1.0; u.pitch = 1.0;
-    const v = pickZhVoice();
-    if (v) u.voice = v;
-    else { const vs = speechSynthesis.getVoices(); if (vs.length) u.voice = vs[0]; } // 无中文语音时回退默认
-    speechSynthesis.speak(u);
+    const vs = speechSynthesis.getVoices() || [];
+    if (vs.length) { _ttsVoices = vs; _ttsReady = true; _ttsZhVoice = vs.find(v => /zh|cmn|Chinese/i.test(v.lang + '|' + v.name)) || null; }
   } catch (_) {}
 }
-// 首次用户手势后解锁 TTS（部分浏览器需手势才能启动语音合成）
+if ('speechSynthesis' in window) { _ttsLoadVoices(); speechSynthesis.onvoiceschanged = _ttsLoadVoices; }
+
+/** 将文本加入 TTS 队列（不直接 cancel+speak，避免 Chrome 静默丢弃） */
+function speakAnnounce(text) {
+  if (!ttsOn || !text || !('speechSynthesis' in window)) return;
+  _ttsQueue.push(text);
+  if (!_ttsDraining) _ttsDrain();
+}
+
+/** 从队列取出一条并播放，播完自动取下一条 */
+function _ttsDrain() {
+  if (!_ttsQueue.length) { _ttsDraining = false; return; }
+  _ttsDraining = true;
+  // 确保语音列表已加载（首次可能为空）
+  if (!_ttsReady) _ttsLoadVoices();
+  try {
+    speechSynthesis.resume();
+    // 如果正在说话，先 cancel 再说新的（仅队列积压时触发）
+    if (speechSynthesis.speaking) speechSynthesis.cancel();
+    const text = _ttsQueue.shift();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'zh-CN'; u.rate = 1.0; u.pitch = 1.0;
+    if (_ttsZhVoice) u.voice = _ttsZhVoice;
+    else if (_ttsVoices.length) u.voice = _ttsVoices[0];
+    // 不强制设 voice 也行：浏览器会按 lang 自动选
+    u.onerror = (e) => { console.warn('[TTS] 合成失败:', e && e.error || 'unknown'); setTimeout(_ttsDrain, 150); };
+    u.onend = () => { setTimeout(_ttsDrain, 120); };   // 条播之间小间隔，更稳定
+    u.onstart = () => {};  // 确认确实开始合成
+    speechSynthesis.speak(u);
+    // 若语音列表仍为空（部分浏览器首次异步），300ms 后重试一次
+    if (!_ttsReady) {
+      setTimeout(() => { if (_ttsReady && !_ttsQueue.length && !speechSynthesis.speaking) speakAnnounce(text); }, 350);
+    }
+  } catch (e) {
+    console.warn('[TTS] 异常:', e && e.message || e);
+    _ttsDraining = false;
+  }
+}
+
+// 用户手势解锁 TTS（Chrome/Edge 需要至少一次交互才能启动语音合成）
 function unlockTTS() {
   if (!('speechSynthesis' in window)) return;
-  try { speechSynthesis.getVoices(); speechSynthesis.resume(); } catch (_) {}
+  try { _ttsLoadVoices(); speechSynthesis.resume(); } catch (_) {}
 }
-['click', 'pointerdown', 'touchstart'].forEach(ev => window.addEventListener(ev, unlockTTS, { once: true, passive: true }));
-function pickZhVoice() {
-  const vs = speechSynthesis.getVoices();
-  return vs.find(v => /zh|cmn|Chinese/i.test(v.lang + v.name)) || null;
-}
-if ('speechSynthesis' in window) speechSynthesis.onvoiceschanged = () => {};
+['click','pointerdown','touchstart','keydown'].forEach(ev =>
+  window.addEventListener(ev, unlockTTS, { once: true, passive: true })
+);
+
 $('#btn-tts').onclick = () => {
   ttsOn = !ttsOn;
   $('#btn-tts').textContent = ttsOn ? '🔊' : '🔇';
-  if (!ttsOn && 'speechSynthesis' in window) speechSynthesis.cancel();
+  if (!ttsOn && 'speechSynthesis' in window) { speechSynthesis.cancel(); _ttsQueue = []; _ttsDraining = false; }
   toast(ttsOn ? '语音播报已开启' : '语音播报已关闭');
 };
 
