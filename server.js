@@ -314,9 +314,14 @@ function botAutoSubmit(room, action, seat) {
   const r = action.role;
   switch (r) {
     case 'werewolf': return { center: randCenter(room) };
-    case 'seer': return (hasCenter(room) && Math.random() < 0.5)
-      ? { mode: 'center', centers: [randCenter(room)] }
-      : { mode: 'player', target: randOther(room, seat) };
+    case 'seer': {
+      if (hasCenter(room) && Math.random() < 0.5) {
+        const a = randCenter(room); let b; do { b = randCenter(room); } while (b === a);
+        return { mode: 'center', centers: [a, b] };
+      }
+      return { mode: 'player', target: randOther(room, seat) };
+    }
+    case 'minion': return { center: hasCenter(room) ? randCenter(room) : null };
     case 'paranormal_detective': return { targets: [randOther(room, seat)] };
     case 'wolfSeer':
     case 'doppelganger': return { target: randOther(room, seat) };
@@ -530,6 +535,8 @@ function finishAutoAction(room, r) {
 }
 
 function roleNeedsInput(role, room, seats) {
+  // 爪牙：仅当场上没有狼人（狼全在中央）时才需行动——可查看一张中央底牌（类独狼）
+  if (role === 'minion') return room.players.filter(p => room.currentRole[p.seat] === 'werewolf').length === 0;
   // 需要玩家做出选择的能力
   const inputRoles = {
     werewolf: seats.length === 1,        // 独狼需选择查看中央
@@ -594,8 +601,13 @@ function buildActionPrompt(room, action, seat) {
   switch (action.role) {
     case 'werewolf': // 独狼看中央
       return { ...base, type: 'werewolf', text: '你是唯一狼人，选择查看一张中央底牌：', centers };
+    case 'minion': {
+      const wolves = room.players.filter(p => room.currentRole[p.seat] === 'werewolf').length;
+      if (wolves === 0) return { ...base, type: 'minionCenter', text: '你是爪牙，但场上没有狼人（狼都在中央）。查看一张中央底牌：', centers };
+      return { ...base, type: 'none', text: r.name };
+    }
     case 'seer':
-      return { ...base, type: 'seer', text: '预言家：查看一名玩家，或查看两张中央底牌。', players, centers, canCenter: true };
+      return { ...base, type: 'seer', text: '预言家：查看一名玩家，或选择 1–2 张中央底牌查看。', players, centers, canCenter: true };
     case 'paranormal_detective':
       return { ...base, type: 'detective', text: '灵异侦探：最多查看 2 名玩家身份。', players, max: 2 };
     case 'wolfSeer':
@@ -658,14 +670,21 @@ function applyAction(room, action, subs) {
   if (r === 'werewolf') {
     const ci = subs[action.seats[0]].center;
     if (ci != null && room.centerCards[ci]) sendPrivate(room, room.players[action.seats[0]].token, `你查看的中央底牌是【${ROLES[room.centerCards[ci].role].name}】。`);
+  } else if (r === 'minion') {
+    action.seats.forEach(seat => {
+      const sub = subs[seat];
+      if (sub && sub.center != null && room.centerCards[sub.center]) {
+        sendPrivate(room, room.players[seat].token, `爪牙：你查看的中央底牌是【${ROLES[room.centerCards[sub.center].role].name}】。`);
+      }
+    });
   } else if (r === 'seer') {
     const s = action.seats[0]; const sub = subs[s];
     if (sub.mode === 'player' && sub.target != null) {
       const tr = room.currentRole[sub.target];
       sendPrivate(room, room.players[s].token, `预言家：你查看 ${seatName(room, sub.target)} 的身份是【${ROLES[tr].name}】。`);
-    } else if (sub.mode === 'center') {
+    } else if (sub.mode === 'center' && sub.centers && sub.centers.length) {
       const names = sub.centers.map(ci => ROLES[room.centerCards[ci].role].name);
-      sendPrivate(room, room.players[s].token, `预言家：你查看的两张中央底牌是【${names.join('、')}】。`);
+      sendPrivate(room, room.players[s].token, `预言家：你查看的中央底牌是【${names.join('、')}】。`);
     }
   } else if (r === 'paranormal_detective') {
     const s = action.seats[0]; const targets = subs[s].targets || [];

@@ -496,10 +496,14 @@ function renderAction(s) {
   actionSel = {};
   let html = `<div class="a-role">${a.roleName} · 你的行动</div><div class="a-text">${a.text}</div>`;
   if (a.type === 'seer') {
-    html += `<div class="row-btns"><button class="btn btn-ghost btn-sm" data-mode="player">查玩家</button><button class="btn btn-ghost btn-sm" data-mode="center">查中央</button></div>`;
+    html += `<div class="row-btns"><button class="btn btn-ghost btn-sm" data-mode="player">查玩家</button><button class="btn btn-ghost btn-sm" data-mode="center">查中央（可多选 1–2 张）</button></div>`;
     html += `<div class="choice-grid" id="a-grid"></div><div class="row-btns"><button class="btn btn-primary" id="a-confirm">确认</button></div>`;
     box.innerHTML = html;
-    box.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => { actionSel = { mode: 'player' }; if (b.dataset.mode === 'center') actionSel.mode = 'center'; box.querySelectorAll('[data-mode]').forEach(x => x.classList.remove('sel')); b.classList.add('sel'); renderSeerChoices(a); });
+    box.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => {
+      actionSel = { mode: 'player' };
+      if (b.dataset.mode === 'center') { actionSel.mode = 'center'; actionSel.centers = []; }
+      box.querySelectorAll('[data-mode]').forEach(x => x.classList.remove('sel')); b.classList.add('sel'); renderSeerChoices(a);
+    });
     renderSeerChoices(a);
   } else if (a.type === 'detective' || a.type === 'troublemaker' || a.type === 'cupid' || a.type === 'tracker') {
     const max = (a.type === 'cupid' || a.type === 'tracker' || a.type === 'troublemaker') ? 2 : 2;
@@ -523,7 +527,7 @@ function renderAction(s) {
     html += `<div class="a-sub">是否净化一名玩家（可选）：</div><div class="choice-grid" id="a-grid"></div>`;
     html += `<div class="row-btns"><button class="btn btn-primary" id="a-confirm">确认</button></div>`;
     box.innerHTML = html; renderPriest(a);
-  } else if (['robber','seePlayer','vampireMark','fear','alphaWolf','sentinel','werewolf','shield','protect','assassin','thief'].includes(a.type)) {
+  } else if (['robber','seePlayer','vampireMark','fear','alphaWolf','sentinel','werewolf','shield','protect','assassin','thief','minionCenter'].includes(a.type)) {
     html += `<div class="choice-grid" id="a-grid"></div><div class="row-btns"><button class="btn btn-primary" id="a-confirm">确认</button></div>`;
     box.innerHTML = html; renderSingleChoice(a);
   } else {
@@ -573,8 +577,15 @@ function renderPriest(a) {
 function renderSeerChoices(a) {
   const grid = $('#a-grid'); if (!grid) return;
   if (actionSel.mode === 'center') {
+    if (!actionSel.centers) actionSel.centers = [];
     grid.innerHTML = a.centers.map(c => `<div class="choice center" data-center="${c.idx}">中央 ${c.idx + 1}${c.locked ? '🔒' : ''}</div>`).join('');
-    grid.querySelectorAll('.choice').forEach(el => el.onclick = () => { actionSel.centers = [Number(el.dataset.center)]; grid.querySelectorAll('.choice').forEach(x => x.classList.remove('sel')); el.classList.add('sel'); });
+    grid.querySelectorAll('.choice').forEach(el => el.onclick = () => {
+      const ci = Number(el.dataset.center);
+      const arr = actionSel.centers;
+      const i = arr.indexOf(ci);
+      if (i >= 0) { arr.splice(i, 1); el.classList.remove('sel'); }
+      else { if (arr.length >= 2) return toast('最多查看 2 张中央底牌'); arr.push(ci); el.classList.add('sel'); }
+    });
   } else {
     grid.innerHTML = a.players.filter(p => !p.isSelf).map(p => `<div class="choice" data-target="${p.seat}">${escapeHtml(p.name)}</div>`).join('');
     grid.querySelectorAll('.choice').forEach(el => el.onclick = () => { actionSel.target = Number(el.dataset.target); grid.querySelectorAll('.choice').forEach(x => x.classList.remove('sel')); el.classList.add('sel'); });
@@ -613,7 +624,10 @@ function renderSingleChoice(a) {
 
 function submitAction(a) {
   let payload = {};
-  if (a.type === 'seer') payload = actionSel;
+  if (a.type === 'seer') {
+    if (actionSel.mode === 'center' && (!actionSel.centers || !actionSel.centers.length)) return toast('请选择至少 1 张中央底牌');
+    payload = actionSel;
+  }
   else if (a.type === 'detective' || a.type === 'troublemaker') payload = { targets: actionSel.targets || [] };
   else if (a.type === 'cupid') payload = { targets: actionSel.targets || [] };
   else if (a.type === 'tracker') payload = { a: (actionSel.targets || [])[0], b: (actionSel.targets || [])[1] };
@@ -623,7 +637,7 @@ function submitAction(a) {
   else if (a.type === 'priest') payload = { target: actionSel.target ?? null };
   else if (a.type === 'robber' || a.type === 'seePlayer' || a.type === 'vampireMark' || a.type === 'fear' || a.type === 'alphaWolf' || a.type === 'assassin' || a.type === 'thief') payload = { target: actionSel.target };
   else if (a.type === 'sentinel' || a.type === 'shield') payload = actionSel.center != null ? { kind: 'center', idx: actionSel.center } : { kind: 'player', target: actionSel.target };
-  else if (a.type === 'werewolf') payload = { center: actionSel.center ?? 0 };
+  else if (a.type === 'werewolf' || a.type === 'minionCenter') payload = { center: actionSel.center ?? 0 };
   else if (a.type === 'protect') payload = { target: actionSel.target };
   else payload = {};
   const type = a.type === 'protect' ? 'protect' : 'nightAction';
@@ -706,6 +720,8 @@ function renderResult(s) {
     ul.appendChild(li);
   });
   $('#center-reveal').innerHTML = '<b>中央底牌：</b>' + (r.center || []).map(c => c.name).join('、');
+  // 「再来一局」仅房主可用（非房主点击无效），对访客隐藏
+  $('#btn-restart').classList.toggle('hidden', !s.isHost);
   $('#btn-restart').onclick = () => api('/api/action', { token: STATE.token, type: 'restart' });
 }
 
@@ -771,13 +787,22 @@ function speakAnnounce(text) {
   if (!ttsOn || !text) return;
   if (!('speechSynthesis' in window)) return;
   try {
-    speechSynthesis.cancel();
+    speechSynthesis.resume();           // 唤醒可能被挂起的合成器
+    if (speechSynthesis.speaking) speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
     u.lang = 'zh-CN'; u.rate = 1.0; u.pitch = 1.0;
-    const v = pickZhVoice(); if (v) u.voice = v;
+    const v = pickZhVoice();
+    if (v) u.voice = v;
+    else { const vs = speechSynthesis.getVoices(); if (vs.length) u.voice = vs[0]; } // 无中文语音时回退默认
     speechSynthesis.speak(u);
   } catch (_) {}
 }
+// 首次用户手势后解锁 TTS（部分浏览器需手势才能启动语音合成）
+function unlockTTS() {
+  if (!('speechSynthesis' in window)) return;
+  try { speechSynthesis.getVoices(); speechSynthesis.resume(); } catch (_) {}
+}
+['click', 'pointerdown', 'touchstart'].forEach(ev => window.addEventListener(ev, unlockTTS, { once: true, passive: true }));
 function pickZhVoice() {
   const vs = speechSynthesis.getVoices();
   return vs.find(v => /zh|cmn|Chinese/i.test(v.lang + v.name)) || null;
@@ -807,11 +832,18 @@ function voiceMakePeer(seat) {
   if (!window.RTCPeerConnection) return null;
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
   const audio = document.createElement('audio');
-  audio.autoplay = true; audio.playsInline = true;
+  audio.autoplay = true; audio.playsInline = true; audio.muted = false;
+  audio.dataset.peer = seat;
+  document.body.appendChild(audio); // 必须挂到 DOM：移动端/部分浏览器对未挂载的音频元素不会出声
   const peer = { pc, audio, pendingCandidates: [] };
-  if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+  if (localStream) localStream.getAudioTracks().forEach(t => pc.addTrack(t, localStream));
   pc.onicecandidate = (e) => { if (e.candidate) voiceSend('signal', { to: seat, data: { candidate: e.candidate } }); };
-  pc.ontrack = (e) => { if (e.streams && e.streams[0]) { audio.srcObject = e.streams[0]; audio.play().catch(() => {}); } };
+  pc.ontrack = (e) => {
+    let stream = (e.streams && e.streams[0]) || null;
+    if (!stream) { stream = new MediaStream(); stream.addTrack(e.track); } // 兜底：某些浏览器 streams 为空，用裸 track 组装
+    audio.srcObject = stream;
+    audio.play().catch(() => {});
+  };
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === 'failed' || pc.connectionState === 'closed') voiceClosePeer(seat);
   };
@@ -831,12 +863,16 @@ async function voiceInitiate(seat) {
   } catch (_) { voiceClosePeer(seat); }
 }
 
+let voicePendingOffers = []; // localStream 未就绪时暂存的 offer
 async function onVoiceSignal(from, data) {
   if (!data) return;
   let peer = voicePeers.get(from);
   if (data.desc) {
     if (!peer) {
       if (data.desc.type !== 'offer') return; // 无连接时的 answer 忽略
+      // 本地麦克风尚未就绪（getUserMedia 进行中）：暂存 offer，待就绪后处理，
+      // 避免创建“无音轨”的 peer 导致对端收不到本端声音（单向无声）。
+      if (!localStream) { voicePendingOffers.push({ from, data }); return; }
       peer = voiceMakePeer(from);
       if (!peer) return;
       voicePeers.set(from, peer);
@@ -856,6 +892,10 @@ async function onVoiceSignal(from, data) {
     if (peer.pc.remoteDescription) { try { await peer.pc.addIceCandidate(data.candidate); } catch (_) {} }
     else peer.pendingCandidates.push(data.candidate);
   }
+}
+function flushVoicePendingOffers() {
+  const list = voicePendingOffers; voicePendingOffers = [];
+  for (const o of list) onVoiceSignal(o.from, o.data);
 }
 
 function voiceClosePeer(seat) {
@@ -911,6 +951,8 @@ async function toggleVoice() {
     toast('麦克风权限被拒绝：' + (err && (err.name || err.message) || '无法访问'));
     return;
   }
+  // 麦克风就绪后，处理 getUserMedia 期间可能暂存的 offer（避免单向无声）
+  flushVoicePendingOffers();
   voiceOn = true;
   renderVoice();
   voiceSend('join');

@@ -226,7 +226,7 @@ select { appearance: none; -webkit-appearance: none; padding-right: 38px; }
 .stepper-fill { height: 100%; border-radius: 999px; background: var(--grad); width: 0%; transition: width .5s cubic-bezier(.2,.7,.3,1); }
 
 /* ---------- 身份卡 ---------- */
-.role-card { border-radius: var(--radius); padding: 18px; margin: 12px 0; text-align: center;
+.role-card { border-radius: var(--radius); padding: 18px; margin: 12px 0; text-align: left;
   background: linear-gradient(160deg, var(--surface-2), var(--surface)); border: 1px solid var(--line-strong);
   position: relative; overflow: hidden; }
 .role-card::before { content: ""; position: absolute; inset: 0; opacity: .14; pointer-events: none;
@@ -236,10 +236,12 @@ select { appearance: none; -webkit-appearance: none; padding-right: 38px; }
 .role-card.team-tanner { --team-c: var(--tanner); border-color: rgba(251,191,36,.5); }
 .role-card.team-vampire { --team-c: var(--vampire); border-color: rgba(192,132,252,.5); }
 .role-card.team-assassin { --team-c: var(--assassin); border-color: rgba(244,114,182,.5); }
+.role-head { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; }
+.role-head-text { flex: 1; min-width: 0; }
 .role-team { font-size: 12px; color: var(--muted); letter-spacing: 1px; }
-.role-icon { display: block; width: 72px; height: 72px; border-radius: 16px; object-fit: cover; margin: 0 auto 8px; border: 2px solid var(--line); background: rgba(255,255,255,.04); }
+.role-icon { display: block; width: 64px; height: 64px; border-radius: 16px; object-fit: cover; flex: none; border: 2px solid var(--line); background: rgba(255,255,255,.04); }
 .role-mark { margin-top: 8px; font-size: 12px; color: var(--accent-2); }
-.role-name { font-size: 30px; font-weight: 800; margin: 6px 0 10px; }
+.role-name { font-size: 28px; font-weight: 800; margin: 2px 0 0; }
 .role-desc { font-size: 13px; color: var(--muted); line-height: 1.7; margin: 0 0 12px; text-align: left; }
 .role-seen { font-size: 13px; line-height: 1.8; text-align: left; color: var(--text);
   background: rgba(0,0,0,.25); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; white-space: pre-wrap; }
