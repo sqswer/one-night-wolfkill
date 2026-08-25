@@ -407,7 +407,7 @@ function startGame(room) {
   // 发牌：每位玩家可见自己身份（通过私有信息）
   for (const p of room.players) {
     const rk = room.currentRole[p.seat];
-    sendPrivate(room, p.token, `你的身份是【${ROLES[rk].name}】（阵营：${teamName(ROLES[rk].team)}）。`);
+    sendPrivate(room, p.token, `游戏开始时，你的身份是【${ROLES[rk].name}】（阵营：${teamName(ROLES[rk].team)}）。`);
   }
   // 被诅咒者：若狼人选择标记则变狼（此处仅提示）
   if (hasDusk) {
@@ -841,6 +841,11 @@ function beginDay(room) {
   if (room.nightTimer) { clearTimeout(room.nightTimer); room.nightTimer = null; }
   announce(room, '天亮了，请睁眼。现在是白天发言阶段，请大家依次发言。');
   publicLog(room, '天亮了，进入白天发言阶段。');
+  // 天亮后给每位玩家追加一条最终身份确认，避免“初始狼人 / 当前预言家”展示不一致
+  for (const p of room.players) {
+    const rk = room.currentRole[p.seat];
+    sendPrivate(room, p.token, `天亮后，你的最终身份是【${ROLES[rk].name}】（阵营：${teamName(ROLES[rk].team)}）。`);
+  }
   room.discussionEndsAt = Date.now() + 5 * 60 * 1000; // 默认 5 分钟讨论
   pushState(room);
 }

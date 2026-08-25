@@ -119,7 +119,10 @@ function connectSSE() {
   es.onopen = () => $('#conn-dot').classList.add('on');
   es.onerror = () => $('#conn-dot').classList.remove('on');
   es.addEventListener('state', (e) => { onState(JSON.parse(e.data)); });
-  es.addEventListener('speak', (e) => { speakAnnounce(JSON.parse(e.data).text); });
+  es.addEventListener('speak', (e) => {
+    const text = JSON.parse(e.data).text;
+    speakAnnounce(text, true);   // speak 事件代表新播报，立即切换文字+声音
+  });
   es.addEventListener('speech', (e) => { addSpeech(JSON.parse(e.data)); });
   es.addEventListener('hunter', (e) => { const d = JSON.parse(e.data); toast(`猎人 ${d.name} 被放逐，可开枪`); });
   es.addEventListener('voice', (e) => { onVoiceState((JSON.parse(e.data).seats) || []); });
@@ -132,9 +135,13 @@ const PHASE_NAME = {
   vote: '投票阶段', result: '游戏结束', result_pending_hunter: '猎人开枪',
 };
 
+let _lastPhase = null;
 function onState(s) {
   STATE.data = s;
   voiceApplyPhase(s.phase);
+  // 新一局开始时清空播报历史
+  if (_lastPhase === 'lobby' && s.phase !== 'lobby') clearAnnHistory();
+  _lastPhase = s.phase;
   if (s.phase === 'lobby') { renderLobby(s); showScreen('lobby'); }
   else { showScreen('game'); renderGame(s); }
 }
@@ -473,9 +480,12 @@ function renderGame(s) {
     else mark.classList.add('hidden');
   } else rc.classList.add('hidden');
 
-  // 播报（文字 + 语音；语音通过 SSE 'speak' 事件已入队，这里兜底防止事件丢失，并做同文本去重）
-  $('#ann-text').textContent = s.announce || '';
-  if (s.announce) speakAnnounce(s.announce);
+  // 播报文字：speak SSE 事件已负责驱动语音；这里只同步文字显示，避免 state 刷新重复触发语音
+  if (s.announce && s.announce !== _currentAnnText) {
+    _currentAnnText = s.announce;
+    $('#ann-text').textContent = s.announce;
+    addAnnHistory(s.announce);
+  }
 
   // 记录
   const log = $('#log'); log.innerHTML = '';
@@ -630,6 +640,7 @@ function renderSingleChoice(a) {
 }
 
 function submitAction(a) {
+  stopAnnounce(); // 用户操作时立即停掉旧播报，保证音文同步
   let payload = {};
   if (a.type === 'seer') {
     if (actionSel.mode === 'center' && (!actionSel.centers || !actionSel.centers.length)) return toast('请选择至少 1 张中央底牌');
@@ -663,6 +674,7 @@ function renderVote(s) {
     el.className = 'vote-item' + (p.isYou ? ' me' : '');
     el.textContent = p.name;
     if (!p.isYou) el.onclick = () => {
+      stopAnnounce();
       $$('#vote-list .vote-item').forEach(x => x.classList.remove('sel')); el.classList.add('sel');
       api('/api/action', { token: STATE.token, type: 'vote', payload: { target: p.seat } });
     };
@@ -673,6 +685,7 @@ function renderVote(s) {
   skip.className = 'vote-item vote-skip';
   skip.textContent = '🚫 不投票';
   skip.onclick = () => {
+    stopAnnounce();
     $$('#vote-list .vote-item').forEach(x => x.classList.remove('sel')); skip.classList.add('sel');
     api('/api/action', { token: STATE.token, type: 'vote', payload: { target: null } });
   };
@@ -798,6 +811,10 @@ let _ttsDraining = false;      // 是否正在逐条播报
 let _ttsUnlocked = false;      // 是否已通过用户手势真正解锁（部分浏览器仅 resume 不够）
 let _lastSpokenText = '';      // 去重：避免 SSE state 与 speak 事件重复播同一条
 let _lastSpokenAt = 0;         // 去重时间戳
+let _currentAnnText = '';      // 当前正显示/播报的文本
+let _annHistory = [];          // 播报历史（用于展示所有播报内容）
+let _audioCtx = null;          // 用于 Via/移动端 WebView 解锁音频自动播放
+let _ttsSupported = ('speechSynthesis' in window);
 
 function _ttsLoadVoices() {
   try {
@@ -819,9 +836,15 @@ if ('speechSynthesis' in window) {
   });
 }
 
-/** 通过一次真实 speak 解锁浏览器的语音自动播放策略（Chrome/Edge/Safari 均需要） */
+/** 通过一次真实 speak + AudioContext 解锁浏览器的语音自动播放策略（Chrome/Edge/Safari/Via 均需要） */
 function unlockTTS() {
-  if (!('speechSynthesis' in window) || _ttsUnlocked) return;
+  if (_ttsUnlocked) return;
+  // 对 Via 等 WebView，先解锁 AudioContext（与 SpeechSynthesis 解锁互补）
+  if (!_audioCtx && window.AudioContext) _audioCtx = new AudioContext();
+  if (_audioCtx && _audioCtx.state === 'suspended') {
+    _audioCtx.resume().catch(() => {});
+  }
+  if (!('speechSynthesis' in window)) { _ttsUnlocked = true; return; }
   try {
     _ttsLoadVoices();
     speechSynthesis.resume();
@@ -832,21 +855,60 @@ function unlockTTS() {
     dummy.onend = () => { _ttsUnlocked = true; };
     dummy.onerror = () => { _ttsUnlocked = true; };
     speechSynthesis.speak(dummy);
+    // Via 部分版本第一次 speak 会失败，200ms 后再试一次
+    setTimeout(() => { if (!_ttsUnlocked && 'speechSynthesis' in window) { try { speechSynthesis.speak(new SpeechSynthesisUtterance(' ')); } catch (_) {} } }, 220);
   } catch (_) { _ttsUnlocked = true; }
 }
 ['click','pointerdown','touchstart','keydown'].forEach(ev =>
   window.addEventListener(ev, unlockTTS, { once: true, passive: true })
 );
 
-/** 将文本加入 TTS 队列（不直接 cancel+speak，避免 Chrome 静默丢弃） */
-function speakAnnounce(text) {
-  if (!ttsOn || !text || !('speechSynthesis' in window)) return;
+/** 显示播报文字并加入 TTS 队列
+ * @param {string} text
+ * @param {boolean} interrupt 为 true 时取消当前播报并清空队列（用于用户操作/新阶段切换，保证音文同步）
+ */
+function speakAnnounce(text, interrupt = false) {
+  if (!text) return;
+  // 更新当前文字与历史记录
+  _currentAnnText = text;
+  $('#ann-text').textContent = text;
+  addAnnHistory(text);
+  if (!ttsOn || !('speechSynthesis' in window)) return;
   // 同一条文本 600ms 内只播一次：SSE state 刷新与 'speak' 事件可能同时触发
-  if (text === _lastSpokenText && Date.now() - _lastSpokenAt < 600) return;
+  if (text === _lastSpokenText && Date.now() - _lastSpokenAt < 600 && !interrupt) return;
   _lastSpokenText = text;
   _lastSpokenAt = Date.now();
+  if (interrupt) {
+    try { speechSynthesis.cancel(); } catch (_) {}
+    _ttsQueue = [];
+    _ttsDraining = false;
+  }
   _ttsQueue.push(text);
   if (!_ttsDraining) _ttsDrain();
+}
+
+/** 添加一条播报历史 */
+function addAnnHistory(text) {
+  if (!text) return;
+  // 避免连续重复
+  if (_annHistory.length && _annHistory[_annHistory.length - 1].text === text) return;
+  _annHistory.push({ text, time: Date.now() });
+  if (_annHistory.length > 40) _annHistory.shift();
+  const el = $('#ann-history');
+  if (el) {
+    const item = document.createElement('div');
+    item.className = 'ann-history-item';
+    item.textContent = text;
+    el.appendChild(item);
+    el.scrollTop = el.scrollHeight;
+  }
+}
+
+/** 清空播报历史（新游戏开始时调用） */
+function clearAnnHistory() {
+  _annHistory = [];
+  const el = $('#ann-history');
+  if (el) el.innerHTML = '';
 }
 
 /** 从队列取出一条并播放，播完自动取下一条 */
@@ -861,8 +923,8 @@ function _ttsDrain() {
     if (speechSynthesis.speaking) speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
     u.lang = 'zh-CN'; u.rate = 1.0; u.pitch = 1.0;
+    // 只强制指定中文语音；找不到时让浏览器按 lang 自动选（避免 Via 等设备因默认英文语音而不出声）
     if (_ttsZhVoice) u.voice = _ttsZhVoice;
-    else if (_ttsVoices.length) u.voice = _ttsVoices[0];
     u.onerror = (e) => {
       console.warn('[TTS] 合成失败:', e && e.error || 'unknown');
       setTimeout(_ttsDrain, 200);
@@ -878,6 +940,13 @@ function _ttsDrain() {
     console.warn('[TTS] 异常:', e && e.message || e);
     setTimeout(_ttsDrain, 200);
   }
+}
+
+/** 强制停止当前播报并清空队列（用户操作时保证音文同步） */
+function stopAnnounce() {
+  _ttsQueue = [];
+  _ttsDraining = false;
+  if ('speechSynthesis' in window) try { speechSynthesis.cancel(); } catch (_) {}
 }
 
 $('#btn-tts').onclick = () => {

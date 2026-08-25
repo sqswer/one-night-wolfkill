@@ -258,6 +258,11 @@ select { appearance: none; -webkit-appearance: none; padding-right: 38px; }
 .announcer-body { flex: 1; min-width: 0; }
 .announcer-name { font-size: 12px; color: var(--accent-2); font-weight: 700; letter-spacing: 1px; margin-bottom: 3px; }
 .announcer-text { font-size: 15px; line-height: 1.65; word-break: break-word; }
+.ann-history-fold { margin: 8px 0 12px; font-size: 13px; color: var(--muted); }
+.ann-history-fold summary { cursor: pointer; user-select: none; }
+.ann-history { max-height: 180px; overflow-y: auto; margin-top: 8px; padding: 8px 10px; background: rgba(0,0,0,.22); border: 1px solid var(--line); border-radius: 10px; }
+.ann-history-item { padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,.06); font-size: 13px; line-height: 1.5; color: var(--text); }
+.ann-history-item:last-child { border-bottom: none; }
 
 /* ---------- 行动 ---------- */
 .action-box { border-color: rgba(124,139,255,.35); }
