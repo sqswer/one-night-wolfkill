@@ -247,8 +247,9 @@ select { appearance: none; -webkit-appearance: none; padding-right: 38px; }
 .role-name { font-size: 28px; font-weight: 800; margin: 2px 0 0; }
 .role-desc { font-size: 13px; color: var(--muted); line-height: 1.7; margin: 0 0 12px; text-align: left; }
 .role-seen { font-size: 13px; line-height: 1.8; text-align: left; color: var(--text);
-  background: rgba(0,0,0,.25); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; white-space: pre-wrap; }
+  background: rgba(0,0,0,.25); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
 .role-seen:empty { display: none; }
+.role-seen-latest { color: var(--accent-2); font-weight: 700; }
 
 /* ---------- 播报员 ---------- */
 .announcer { display: flex; gap: 12px; align-items: flex-start;

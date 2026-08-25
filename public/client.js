@@ -123,6 +123,15 @@ function connectSSE() {
     const text = JSON.parse(e.data).text;
     speakAnnounce(text);   // speak 事件代表一条新播报，入队依次完整朗读（上帝视角）
   });
+  es.addEventListener('private', (e) => {
+    const d = JSON.parse(e.data);
+    // 服务端也会在下一次 state 中推送，这里立刻追加到当前状态并渲染，确保信息即时显示
+    if (STATE.data && STATE.data.you) {
+      if (!STATE.data.you.seen) STATE.data.you.seen = [];
+      if (!STATE.data.you.seen.includes(d.text)) STATE.data.you.seen.push(d.text);
+      renderGame(STATE.data);
+    }
+  });
   es.addEventListener('speech', (e) => { addSpeech(JSON.parse(e.data)); });
   es.addEventListener('hunter', (e) => { const d = JSON.parse(e.data); toast(`猎人 ${d.name} 被放逐，可开枪`); });
   es.addEventListener('voice', (e) => { onVoiceState((JSON.parse(e.data).seats) || []); });
@@ -137,10 +146,15 @@ const PHASE_NAME = {
 
 let _lastPhase = null;
 function onState(s) {
+  const wasLobby = _lastPhase === 'lobby';
   STATE.data = s;
   voiceApplyPhase(s.phase);
-  // 新一局开始时清空播报历史
-  if (_lastPhase === 'lobby' && s.phase !== 'lobby') clearAnnHistory();
+  // 新一局开始时清空播报历史与语音队列/去重，避免旧消息或上一轮去重影响本轮
+  if (wasLobby && s.phase !== 'lobby') {
+    clearAnnHistory();
+    stopAnnounce();
+    _ttsLastEnqueued = '';
+  }
   _lastPhase = s.phase;
   if (s.phase === 'lobby') { renderLobby(s); showScreen('lobby'); }
   else { showScreen('game'); renderGame(s); }
@@ -474,7 +488,15 @@ function renderGame(s) {
     $('#role-name').textContent = s.you.role.name;
     const rl = (window.ROLE_MAP && window.ROLE_MAP[s.you.role.key]) || null;
     $('#role-desc').textContent = rl ? rl.ability : (ROLE_DESC[s.you.role.key] || '');
-    $('#role-seen').textContent = (s.you.seen && s.you.seen.length) ? s.you.seen.join('\n') : '';
+    const rs = $('#role-seen');
+    if (s.you.seen && s.you.seen.length) {
+      const latest = s.you.seen[s.you.seen.length - 1];
+      const prev = s.you.seen.slice(0, -1);
+      rs.innerHTML = (prev.length ? prev.map(escapeHtml).join('<br>') + '<br>' : '') +
+        `<span class="role-seen-latest">${escapeHtml(latest)}</span>`;
+    } else {
+      rs.textContent = '';
+    }
     const mark = $('#role-mark');
     if (s.you.mark) { mark.textContent = '你的标记：' + s.you.mark; mark.classList.remove('hidden'); }
     else mark.classList.add('hidden');

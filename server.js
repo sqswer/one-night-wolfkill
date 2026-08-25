@@ -468,10 +468,10 @@ function isEpicBattle(room) {
   return hasWolf && hasVamp;
 }
 
-// 构建唤醒队列（仅包含玩家中实际持有的、需唤醒的角色）
+// 构建唤醒队列（按本局牌堆中所有需唤醒的角色生成，上帝视角：不论该角色在玩家手中还是中央，都完整播报）
 function setupStage(room, stage) {
   const orderKey = stage === 'dusk' ? 'duskOrder' : 'nightOrder';
-  const present = {}; // role -> [seats]
+  const present = {}; // role -> [seats]（实际持有该角色的玩家座位）
   room.players.forEach(p => {
     // 恐惧标记：被标记者本夜不能行动（仅夜晚阶段生效；黄昏阶段恐惧标记尚未放）
     if (stage === 'night' && room.marks[p.seat] && room.marks[p.seat].fear) return;
@@ -481,9 +481,11 @@ function setupStage(room, stage) {
       (present[rk] = present[rk] || []).push(p.seat);
     }
   });
-  const queue = Object.keys(present)
+  // 从整副牌（玩家 + 中央）中取出所有需要唤醒的角色，去重后按官方顺序排序
+  const queue = [...new Set(room.deck)]
+    .filter(rk => { const r = ROLES[rk]; return r && r.wake && r[orderKey] != null; })
     .sort((a, b) => (ROLES[a][orderKey] - ROLES[b][orderKey]))
-    .map(rk => ({ role: rk, seats: present[rk], stage }));
+    .map(rk => ({ role: rk, seats: present[rk] || [], stage }));
   room.queue = queue;
   room.qIndex = -1;
   if (stage === 'dusk') announce(room, '天黑前，进入黄昏阶段。');
@@ -508,7 +510,8 @@ function advanceQueue(room) {
   const r = ROLES[item.role];
   const stageName = item.stage === 'dusk' ? '黄昏' : '夜晚';
   announce(room, `${stageName}：${r.hint || `请【${r.name}】睁眼。`}`);
-  const needsInput = roleNeedsInput(item.role, room, item.seats);
+  // 没有玩家持有该角色时（只在中央），仅播报睁眼/闭眼流程，不请求输入也不执行效果
+  const needsInput = item.seats.length > 0 && roleNeedsInput(item.role, room, item.seats);
   room.currentAction = { role: item.role, stage: item.stage, seats: item.seats, submissions: {}, needsInput };
   if (needsInput) {
     // 机器人座位自动补提交；若仍有人（真人）未提交则等待客户端 UI
