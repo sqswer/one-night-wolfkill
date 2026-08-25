@@ -508,8 +508,7 @@ function advanceQueue(room) {
   }
   const item = room.queue[room.qIndex];
   const r = ROLES[item.role];
-  const stageName = item.stage === 'dusk' ? '黄昏' : '夜晚';
-  announce(room, `${stageName}：${r.hint || `请【${r.name}】睁眼。`}`);
+  announce(room, r.hint || `请【${r.name}】睁眼。`);
   // 没有玩家持有该角色时（只在中央），仅播报睁眼/闭眼流程，不请求输入也不执行效果
   const needsInput = item.seats.length > 0 && roleNeedsInput(item.role, room, item.seats);
   room.currentAction = { role: item.role, stage: item.stage, seats: item.seats, submissions: {}, needsInput };

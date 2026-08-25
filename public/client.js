@@ -902,23 +902,22 @@ let _ttsWarned = false;
 );
 
 /** 加入一条播报（上帝视角：所有角色的播报都依次完整朗读，不再因打断而跳过）
- * 文字展示由 _speakOne 在实际开始朗读时同步更新，保证「音文同步」。
+ * 文字展示在此处无条件先完成，保证「每条播报都有对应文字」，不依赖语音是否可用/已解锁。
  * @param {string} text
  */
 function speakAnnounce(text) {
   if (!text) return;
-  // 入队去重：与最近入队内容相同则跳过，避免重复播报
+  // 入队去重：与最近入队内容相同则跳过，避免重复播报（同一条播报被 state/speak 重复推送时）
   if (text === _ttsLastEnqueued) return;
   _ttsLastEnqueued = text;
   // 历史记录始终保留（文字展示不丢）
   addAnnHistory(text);
-  if (!ttsOn || !('speechSynthesis' in window)) {
-    // 未开启语音 / 浏览器不支持：直接展示文字，保证「有对应文字」
-    _currentAnnText = text;
-    const el = $('#ann-text'); if (el) el.textContent = text;
-    return;
-  }
-  // 非打断：顺序入队，由 _ttsDrain 逐条完整朗读（含开场、各角色睁眼/闭眼提示）
+  // 关键：无论语音是否可用、是否已解锁，都立即把文字展示到播报区（保证「每条播报都有对应文字」）
+  _currentAnnText = text;
+  const annEl = $('#ann-text'); if (annEl) annEl.textContent = text;
+  // 语音：未开启或浏览器不支持时不再进一步处理（文字已展示）
+  if (!ttsOn || !('speechSynthesis' in window)) return;
+  // 上帝视角：顺序入队，由 _ttsDrain 逐条完整朗读（含开场、各角色睁眼/闭眼提示）
   _ttsQueue.push(text);
   if (!_ttsDraining) _ttsDrain();
 }
@@ -960,8 +959,11 @@ function _ttsDrain() {
   _speakOne(text);
 }
 
-/** 朗读单条；文字在开始朗读时同步更新；Via 静默失败时重试一次 */
+/** 朗读单条；文字已由 speakAnnounce 先行展示，此处只负责「出声」。
+ *  未解锁（用户尚未交互）时语音无法播放，快速跳过、保留文字，避免卡顿与丢条。 */
 function _speakOne(text) {
+  // 尚未解锁：语音无法播放，直接推进（文字已展示），不浪费 2 秒等待
+  if (!_ttsUnlocked) { _ttsCurrentText = null; _ttsDraining = false; setTimeout(_ttsDrain, 60); return; }
   try {
     speechSynthesis.resume();
     // 若上一条还在说（极少情况），先取消再说新的
@@ -974,9 +976,6 @@ function _speakOne(text) {
     u.onend = () => { _afterUtterance(); };
     u.onstart = () => { _ttsUnlocked = true; _ttsCurrentStarted = true; };
     speechSynthesis.speak(u);
-    // 文字与语音同步：开始朗读即更新展示文字
-    _currentAnnText = text;
-    const el = $('#ann-text'); if (el) el.textContent = text;
     // Via 兜底：1s 后仍未真正开始朗读（静默失败），重试一次；再失败则跳过本条继续后续
     setTimeout(() => {
       if (!_ttsDraining || _ttsCurrentText !== text) return;
@@ -986,6 +985,7 @@ function _speakOne(text) {
       } else { _ttsRetryCount = 0; }
     }, 1000);
   } catch (e) {
+    // speak 抛异常（常见于未解锁自动播放策略）：文字已展示，仅跳过本条语音继续后续
     console.warn('[TTS] 异常:', e && e.message || e);
     _afterUtterance();
   }
