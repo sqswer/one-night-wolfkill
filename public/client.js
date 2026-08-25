@@ -478,6 +478,12 @@ function renderGame(s) {
     const mark = $('#role-mark');
     if (s.you.mark) { mark.textContent = '你的标记：' + s.you.mark; mark.classList.remove('hidden'); }
     else mark.classList.add('hidden');
+    // 失眠者：白天在角色卡下方显示"最终身份"小字（仅此角色可见最终身份）
+    const finalEl = $('#role-final');
+    if (s.you.finalRole) {
+      finalEl.textContent = `你现在的身份是【${s.you.finalRole.name}】（最终身份）`;
+      finalEl.classList.remove('hidden');
+    } else finalEl.classList.add('hidden');
   } else rc.classList.add('hidden');
 
   // 播报文字：speak SSE 事件已负责驱动语音；这里只同步文字显示，避免 state 刷新重复触发语音

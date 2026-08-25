@@ -238,10 +238,16 @@ function buildState(room, player) {
   }));
   let you = null;
   if (room.phase !== 'lobby') {
-    const rk = room.currentRole[player.seat];
-    you = { seat: player.seat, role: rk ? { key: rk, name: ROLES[rk].name, team: playerTeam(room, player.seat) } : null };
+    // 角色卡恒定显示【初始身份】（一夜狼人杀规则：白天界面不变，玩家据此推理）
+    const rk = room.initialRole[player.seat];
+    you = { seat: player.seat, role: rk ? { key: rk, name: ROLES[rk].name, team: ROLES[rk].team } : null };
     if (room.privateInfo[player.token]) you.seen = room.privateInfo[player.token];
     if (room.marks[player.seat]) you.mark = markDesc(room, player.seat);
+    // 仅失眠者在白天补充"最终身份"小字（其能力为天亮前查看自身最终身份）
+    if (rk === 'insomniac') {
+      const fk = room.currentRole[player.seat];
+      you.finalRole = fk ? { key: fk, name: ROLES[fk].name } : null;
+    }
   }
   // 当前行动提示（仅行动者可见选项）
   let action = null;
@@ -841,11 +847,8 @@ function beginDay(room) {
   if (room.nightTimer) { clearTimeout(room.nightTimer); room.nightTimer = null; }
   announce(room, '天亮了，请睁眼。现在是白天发言阶段，请大家依次发言。');
   publicLog(room, '天亮了，进入白天发言阶段。');
-  // 天亮后给每位玩家追加一条最终身份确认，避免“初始狼人 / 当前预言家”展示不一致
-  for (const p of room.players) {
-    const rk = room.currentRole[p.seat];
-    sendPrivate(room, p.token, `天亮后，你的最终身份是【${ROLES[rk].name}】（阵营：${teamName(ROLES[rk].team)}）。`);
-  }
+  // 注意：白天角色卡恒定显示初始身份（见 buildState）。最终身份仅失眠者可在天亮前查看，
+  // 已由夜晚 roleReveal('insomniac') 以私有信息告知，此处不再向全员广播。
   room.discussionEndsAt = Date.now() + 5 * 60 * 1000; // 默认 5 分钟讨论
   pushState(room);
 }
