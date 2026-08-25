@@ -663,7 +663,7 @@ function renderSingleChoice(a) {
 }
 
 function submitAction(a) {
-  stopAnnounce(); // 用户操作时立即停掉旧播报，保证音文同步
+  // 上帝视角播报不应因玩家操作而中断/清空，保持完整流程
   let payload = {};
   if (a.type === 'seer') {
     if (actionSel.mode === 'center' && (!actionSel.centers || !actionSel.centers.length)) return toast('请选择至少 1 张中央底牌');
@@ -697,7 +697,6 @@ function renderVote(s) {
     el.className = 'vote-item' + (p.isYou ? ' me' : '');
     el.textContent = p.name;
     if (!p.isYou) el.onclick = () => {
-      stopAnnounce();
       $$('#vote-list .vote-item').forEach(x => x.classList.remove('sel')); el.classList.add('sel');
       api('/api/action', { token: STATE.token, type: 'vote', payload: { target: p.seat } });
     };
@@ -708,7 +707,6 @@ function renderVote(s) {
   skip.className = 'vote-item vote-skip';
   skip.textContent = '🚫 不投票';
   skip.onclick = () => {
-    stopAnnounce();
     $$('#vote-list .vote-item').forEach(x => x.classList.remove('sel')); skip.classList.add('sel');
     api('/api/action', { token: STATE.token, type: 'vote', payload: { target: null } });
   };
@@ -869,7 +867,7 @@ function unlockTTS() {
   if (_audioCtx && _audioCtx.state === 'suspended') {
     _audioCtx.resume().catch(() => {});
   }
-  if (!('speechSynthesis' in window)) { _ttsUnlocked = true; return; }
+  if (!('speechSynthesis' in window)) { _ttsUnlocked = true; _ttsDrain(); return; }
   try {
     _ttsLoadVoices();
     speechSynthesis.resume();
@@ -879,22 +877,25 @@ function unlockTTS() {
       try {
         const dummy = new SpeechSynthesisUtterance('一');
         dummy.volume = 0.4; dummy.lang = 'zh-CN'; dummy.rate = 1.6;
-        dummy.onend = () => { _ttsUnlocked = true; };
-        dummy.onerror = () => { _ttsUnlocked = true; };
+        dummy.onend = () => { if (_ttsUnlocked) return; _ttsUnlocked = true; _ttsDrain(); };
+        dummy.onerror = () => { if (_ttsUnlocked) return; _ttsUnlocked = true; _ttsDrain(); };
         speechSynthesis.speak(dummy);
-      } catch (_) { _ttsUnlocked = true; }
+      } catch (_) { if (!_ttsUnlocked) { _ttsUnlocked = true; _ttsDrain(); } }
     };
     fire();
     // Via 部分版本第一次 speak 会失败，220ms 后再试一次
     setTimeout(() => { if (!_ttsUnlocked) fire(); }, 220);
-    // 若设备根本没有可用的语音引擎（如部分 Via/WebView），给一次友好提示，回退到文字展示
+    // 兜底：1.5s 后若仍未解锁（无引擎或 WebView 不触发 onend），强制解锁并继续 drain，避免死锁
     setTimeout(() => {
-      if (!_ttsUnlocked && _ttsLoadVoices && !_ttsReady && !_ttsWarned) {
+      if (_ttsUnlocked) return;
+      _ttsUnlocked = true;
+      _ttsDrain();
+      if (!_ttsReady && !_ttsWarned) {
         _ttsWarned = true;
         toast('当前浏览器可能无法语音播报，已改为文字显示。建议用 Chrome / Edge 获得语音。');
       }
     }, 1500);
-  } catch (_) { _ttsUnlocked = true; }
+  } catch (_) { _ttsUnlocked = true; _ttsDrain(); }
 }
 let _ttsWarned = false;
 ['click','pointerdown','touchstart','keydown','pointerup'].forEach(ev =>
@@ -919,6 +920,8 @@ function speakAnnounce(text) {
   if (!ttsOn || !('speechSynthesis' in window)) return;
   // 上帝视角：顺序入队，由 _ttsDrain 逐条完整朗读（含开场、各角色睁眼/闭眼提示）
   _ttsQueue.push(text);
+  // 未解锁期间限制队列长度，避免过度堆积；unlock 后从头部继续朗读
+  if (_ttsQueue.length > 8) _ttsQueue.shift();
   if (!_ttsDraining) _ttsDrain();
 }
 
@@ -960,10 +963,15 @@ function _ttsDrain() {
 }
 
 /** 朗读单条；文字已由 speakAnnounce 先行展示，此处只负责「出声」。
- *  未解锁（用户尚未交互）时语音无法播放，快速跳过、保留文字，避免卡顿与丢条。 */
+ *  未解锁（用户尚未交互）时把本条放回队列头部，等解锁后继续朗读，不丢弃。 */
 function _speakOne(text) {
-  // 尚未解锁：语音无法播放，直接推进（文字已展示），不浪费 2 秒等待
-  if (!_ttsUnlocked) { _ttsCurrentText = null; _ttsDraining = false; setTimeout(_ttsDrain, 60); return; }
+  // 尚未解锁：语音无法播放，把本条塞回队列头部，等用户手势解锁后自动续播
+  if (!_ttsUnlocked) {
+    _ttsQueue.unshift(text);
+    _ttsCurrentText = null;
+    _ttsDraining = false;
+    return;
+  }
   try {
     speechSynthesis.resume();
     // 若上一条还在说（极少情况），先取消再说新的
