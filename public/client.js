@@ -473,8 +473,9 @@ function renderGame(s) {
     else mark.classList.add('hidden');
   } else rc.classList.add('hidden');
 
-  // 播报
+  // 播报（文字 + 语音；语音通过 SSE 'speak' 事件已入队，这里兜底防止事件丢失，并做同文本去重）
   $('#ann-text').textContent = s.announce || '';
+  if (s.announce) speakAnnounce(s.announce);
 
   // 记录
   const log = $('#log'); log.innerHTML = '';
@@ -794,18 +795,56 @@ let _ttsReady = false;         // 语音列表是否已加载
 let _ttsZhVoice = null;        // 缓存的中文语音
 let _ttsQueue = [];            // 待播报队列
 let _ttsDraining = false;      // 是否正在逐条播报
+let _ttsUnlocked = false;      // 是否已通过用户手势真正解锁（部分浏览器仅 resume 不够）
+let _lastSpokenText = '';      // 去重：避免 SSE state 与 speak 事件重复播同一条
+let _lastSpokenAt = 0;         // 去重时间戳
 
 function _ttsLoadVoices() {
   try {
     const vs = speechSynthesis.getVoices() || [];
-    if (vs.length) { _ttsVoices = vs; _ttsReady = true; _ttsZhVoice = vs.find(v => /zh|cmn|Chinese/i.test(v.lang + '|' + v.name)) || null; }
+    if (vs.length) {
+      _ttsVoices = vs;
+      _ttsReady = true;
+      // 优先中文（Microsoft Xiaoxiao / Google 中文等），否则让浏览器按 lang 自动选
+      _ttsZhVoice = vs.find(v => /zh|cmn|Chinese/i.test(v.lang + '|' + v.name)) || null;
+    }
   } catch (_) {}
 }
-if ('speechSynthesis' in window) { _ttsLoadVoices(); speechSynthesis.onvoiceschanged = _ttsLoadVoices; }
+if ('speechSynthesis' in window) {
+  _ttsLoadVoices();
+  speechSynthesis.onvoiceschanged = _ttsLoadVoices;
+  // 切回标签页时自动恢复（浏览器切后台常暂停语音合成）
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && 'speechSynthesis' in window) try { speechSynthesis.resume(); } catch (_) {}
+  });
+}
+
+/** 通过一次真实 speak 解锁浏览器的语音自动播放策略（Chrome/Edge/Safari 均需要） */
+function unlockTTS() {
+  if (!('speechSynthesis' in window) || _ttsUnlocked) return;
+  try {
+    _ttsLoadVoices();
+    speechSynthesis.resume();
+    // 用几乎静音的 utterance 完成手势解锁；不 cancel，避免打断正在播的内容
+    const dummy = new SpeechSynthesisUtterance(' ');
+    dummy.volume = 0.01;
+    dummy.lang = 'zh-CN';
+    dummy.onend = () => { _ttsUnlocked = true; };
+    dummy.onerror = () => { _ttsUnlocked = true; };
+    speechSynthesis.speak(dummy);
+  } catch (_) { _ttsUnlocked = true; }
+}
+['click','pointerdown','touchstart','keydown'].forEach(ev =>
+  window.addEventListener(ev, unlockTTS, { once: true, passive: true })
+);
 
 /** 将文本加入 TTS 队列（不直接 cancel+speak，避免 Chrome 静默丢弃） */
 function speakAnnounce(text) {
   if (!ttsOn || !text || !('speechSynthesis' in window)) return;
+  // 同一条文本 600ms 内只播一次：SSE state 刷新与 'speak' 事件可能同时触发
+  if (text === _lastSpokenText && Date.now() - _lastSpokenAt < 600) return;
+  _lastSpokenText = text;
+  _lastSpokenAt = Date.now();
   _ttsQueue.push(text);
   if (!_ttsDraining) _ttsDrain();
 }
@@ -814,46 +853,43 @@ function speakAnnounce(text) {
 function _ttsDrain() {
   if (!_ttsQueue.length) { _ttsDraining = false; return; }
   _ttsDraining = true;
-  // 确保语音列表已加载（首次可能为空）
   if (!_ttsReady) _ttsLoadVoices();
+  const text = _ttsQueue.shift();
   try {
     speechSynthesis.resume();
     // 如果正在说话，先 cancel 再说新的（仅队列积压时触发）
     if (speechSynthesis.speaking) speechSynthesis.cancel();
-    const text = _ttsQueue.shift();
     const u = new SpeechSynthesisUtterance(text);
     u.lang = 'zh-CN'; u.rate = 1.0; u.pitch = 1.0;
     if (_ttsZhVoice) u.voice = _ttsZhVoice;
     else if (_ttsVoices.length) u.voice = _ttsVoices[0];
-    // 不强制设 voice 也行：浏览器会按 lang 自动选
-    u.onerror = (e) => { console.warn('[TTS] 合成失败:', e && e.error || 'unknown'); setTimeout(_ttsDrain, 150); };
+    u.onerror = (e) => {
+      console.warn('[TTS] 合成失败:', e && e.error || 'unknown');
+      setTimeout(_ttsDrain, 200);
+    };
     u.onend = () => { setTimeout(_ttsDrain, 120); };   // 条播之间小间隔，更稳定
-    u.onstart = () => {};  // 确认确实开始合成
+    u.onstart = () => { _ttsUnlocked = true; };
     speechSynthesis.speak(u);
-    // 若语音列表仍为空（部分浏览器首次异步），300ms 后重试一次
-    if (!_ttsReady) {
-      setTimeout(() => { if (_ttsReady && !_ttsQueue.length && !speechSynthesis.speaking) speakAnnounce(text); }, 350);
-    }
+    // 兜底：某些浏览器会静默丢弃 utterance（onend/onerror 都不触发），500ms 后若没继续则强制推进
+    setTimeout(() => {
+      if (!speechSynthesis.speaking && _ttsQueue.length) _ttsDrain();
+    }, 700);
   } catch (e) {
     console.warn('[TTS] 异常:', e && e.message || e);
-    _ttsDraining = false;
+    setTimeout(_ttsDrain, 200);
   }
 }
-
-// 用户手势解锁 TTS（Chrome/Edge 需要至少一次交互才能启动语音合成）
-function unlockTTS() {
-  if (!('speechSynthesis' in window)) return;
-  try { _ttsLoadVoices(); speechSynthesis.resume(); } catch (_) {}
-}
-['click','pointerdown','touchstart','keydown'].forEach(ev =>
-  window.addEventListener(ev, unlockTTS, { once: true, passive: true })
-);
 
 $('#btn-tts').onclick = () => {
   ttsOn = !ttsOn;
   $('#btn-tts').textContent = ttsOn ? '🔊' : '🔇';
-  if (!ttsOn && 'speechSynthesis' in window) { speechSynthesis.cancel(); _ttsQueue = []; _ttsDraining = false; }
-  toast(ttsOn ? '语音播报已开启' : '语音播报已关闭');
+  if (ttsOn && 'speechSynthesis' in window) {
+    unlockTTS();                         // 切换开启本身就是一次用户手势，立即解锁
+    toast('语音播报已开启');
+  } else {
+    if ('speechSynthesis' in window) { speechSynthesis.cancel(); _ttsQueue = []; _ttsDraining = false; }
+    toast('语音播报已关闭');
+  }
 };
 
 // --------------------------- 房间实时语音（WebRTC Mesh） ---------------------------
