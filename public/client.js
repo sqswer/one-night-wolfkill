@@ -121,7 +121,7 @@ function connectSSE() {
   es.addEventListener('state', (e) => { onState(JSON.parse(e.data)); });
   es.addEventListener('speak', (e) => {
     const text = JSON.parse(e.data).text;
-    speakAnnounce(text, true);   // speak 事件代表新播报，立即切换文字+声音
+    speakAnnounce(text);   // speak 事件代表一条新播报，入队依次完整朗读（上帝视角）
   });
   es.addEventListener('speech', (e) => { addSpeech(JSON.parse(e.data)); });
   es.addEventListener('hunter', (e) => { const d = JSON.parse(e.data); toast(`猎人 ${d.name} 被放逐，可开枪`); });
@@ -486,12 +486,7 @@ function renderGame(s) {
     } else finalEl.classList.add('hidden');
   } else rc.classList.add('hidden');
 
-  // 播报文字：speak SSE 事件已负责驱动语音；这里只同步文字显示，避免 state 刷新重复触发语音
-  if (s.announce && s.announce !== _currentAnnText) {
-    _currentAnnText = s.announce;
-    $('#ann-text').textContent = s.announce;
-    addAnnHistory(s.announce);
-  }
+  // 播报文字由 speak SSE 事件驱动（_speakOne 在开始朗读时同步 #ann-text，保证音文同步）
 
   // 记录
   const log = $('#log'); log.innerHTML = '';
@@ -812,15 +807,17 @@ function stopMic() { if (micRec) micRec.stop(); recording = false; $('#btn-mic')
 let _ttsVoices = [];          // 缓存的语音列表（onvoiceschanged 时更新）
 let _ttsReady = false;         // 语音列表是否已加载
 let _ttsZhVoice = null;        // 缓存的中文语音
-let _ttsQueue = [];            // 待播报队列
+let _ttsQueue = [];            // 待播报队列（上帝视角：所有角色播报依次完整朗读）
 let _ttsDraining = false;      // 是否正在逐条播报
 let _ttsUnlocked = false;      // 是否已通过用户手势真正解锁（部分浏览器仅 resume 不够）
-let _lastSpokenText = '';      // 去重：避免 SSE state 与 speak 事件重复播同一条
-let _lastSpokenAt = 0;         // 去重时间戳
+let _ttsLastEnqueued = '';     // 入队去重：避免同一条播报重复入队
 let _currentAnnText = '';      // 当前正显示/播报的文本
 let _annHistory = [];          // 播报历史（用于展示所有播报内容）
 let _audioCtx = null;          // 用于 Via/移动端 WebView 解锁音频自动播放
 let _ttsSupported = ('speechSynthesis' in window);
+let _ttsCurrentText = null;    // 当前正在朗读的文本（供静默失败重试判断）
+let _ttsCurrentStarted = false;// 当前 utterance 是否已真正开始（onstart）
+let _ttsRetryCount = 0;        // 当前语句静默失败重试次数
 
 function _ttsLoadVoices() {
   try {
@@ -842,7 +839,7 @@ if ('speechSynthesis' in window) {
   });
 }
 
-/** 通过一次真实 speak + AudioContext 解锁浏览器的语音自动播放策略（Chrome/Edge/Safari/Via 均需要） */
+/** 通过一次真实可听 speak + AudioContext 解锁浏览器的语音自动播放策略（Chrome/Edge/Safari/Via 均需要） */
 function unlockTTS() {
   if (_ttsUnlocked) return;
   // 对 Via 等 WebView，先解锁 AudioContext（与 SpeechSynthesis 解锁互补）
@@ -854,41 +851,52 @@ function unlockTTS() {
   try {
     _ttsLoadVoices();
     speechSynthesis.resume();
-    // 用几乎静音的 utterance 完成手势解锁；不 cancel，避免打断正在播的内容
-    const dummy = new SpeechSynthesisUtterance(' ');
-    dummy.volume = 0.01;
-    dummy.lang = 'zh-CN';
-    dummy.onend = () => { _ttsUnlocked = true; };
-    dummy.onerror = () => { _ttsUnlocked = true; };
-    speechSynthesis.speak(dummy);
-    // Via 部分版本第一次 speak 会失败，200ms 后再试一次
-    setTimeout(() => { if (!_ttsUnlocked && 'speechSynthesis' in window) { try { speechSynthesis.speak(new SpeechSynthesisUtterance(' ')); } catch (_) {} } }, 220);
+    // Via 等 WebView 对「静音/极小音量」utterance 会直接忽略而不触发 onend，
+    // 导致解锁失败——这里用一次真实可听的极短发音完成手势绑定。
+    const fire = () => {
+      try {
+        const dummy = new SpeechSynthesisUtterance('一');
+        dummy.volume = 0.4; dummy.lang = 'zh-CN'; dummy.rate = 1.6;
+        dummy.onend = () => { _ttsUnlocked = true; };
+        dummy.onerror = () => { _ttsUnlocked = true; };
+        speechSynthesis.speak(dummy);
+      } catch (_) { _ttsUnlocked = true; }
+    };
+    fire();
+    // Via 部分版本第一次 speak 会失败，220ms 后再试一次
+    setTimeout(() => { if (!_ttsUnlocked) fire(); }, 220);
+    // 若设备根本没有可用的语音引擎（如部分 Via/WebView），给一次友好提示，回退到文字展示
+    setTimeout(() => {
+      if (!_ttsUnlocked && _ttsLoadVoices && !_ttsReady && !_ttsWarned) {
+        _ttsWarned = true;
+        toast('当前浏览器可能无法语音播报，已改为文字显示。建议用 Chrome / Edge 获得语音。');
+      }
+    }, 1500);
   } catch (_) { _ttsUnlocked = true; }
 }
-['click','pointerdown','touchstart','keydown'].forEach(ev =>
+let _ttsWarned = false;
+['click','pointerdown','touchstart','keydown','pointerup'].forEach(ev =>
   window.addEventListener(ev, unlockTTS, { once: true, passive: true })
 );
 
-/** 显示播报文字并加入 TTS 队列
+/** 加入一条播报（上帝视角：所有角色的播报都依次完整朗读，不再因打断而跳过）
+ * 文字展示由 _speakOne 在实际开始朗读时同步更新，保证「音文同步」。
  * @param {string} text
- * @param {boolean} interrupt 为 true 时取消当前播报并清空队列（用于用户操作/新阶段切换，保证音文同步）
  */
-function speakAnnounce(text, interrupt = false) {
+function speakAnnounce(text) {
   if (!text) return;
-  // 更新当前文字与历史记录
-  _currentAnnText = text;
-  $('#ann-text').textContent = text;
+  // 入队去重：与最近入队内容相同则跳过，避免重复播报
+  if (text === _ttsLastEnqueued) return;
+  _ttsLastEnqueued = text;
+  // 历史记录始终保留（文字展示不丢）
   addAnnHistory(text);
-  if (!ttsOn || !('speechSynthesis' in window)) return;
-  // 同一条文本 600ms 内只播一次：SSE state 刷新与 'speak' 事件可能同时触发
-  if (text === _lastSpokenText && Date.now() - _lastSpokenAt < 600 && !interrupt) return;
-  _lastSpokenText = text;
-  _lastSpokenAt = Date.now();
-  if (interrupt) {
-    try { speechSynthesis.cancel(); } catch (_) {}
-    _ttsQueue = [];
-    _ttsDraining = false;
+  if (!ttsOn || !('speechSynthesis' in window)) {
+    // 未开启语音 / 浏览器不支持：直接展示文字，保证「有对应文字」
+    _currentAnnText = text;
+    const el = $('#ann-text'); if (el) el.textContent = text;
+    return;
   }
+  // 非打断：顺序入队，由 _ttsDrain 逐条完整朗读（含开场、各角色睁眼/闭眼提示）
   _ttsQueue.push(text);
   if (!_ttsDraining) _ttsDrain();
 }
@@ -917,41 +925,64 @@ function clearAnnHistory() {
   if (el) el.innerHTML = '';
 }
 
-/** 从队列取出一条并播放，播完自动取下一条 */
+/** 从队列取出一条并播放，播完自动取下一条（上帝视角：每条都完整读完） */
 function _ttsDrain() {
-  if (!_ttsQueue.length) { _ttsDraining = false; return; }
+  if (!_ttsQueue.length) { _ttsDraining = false; _ttsCurrentText = null; return; }
+  if (_ttsDraining) return; // 已有 drain 在跑，新入队的条目会被它一并处理
   _ttsDraining = true;
   if (!_ttsReady) _ttsLoadVoices();
   const text = _ttsQueue.shift();
+  _ttsCurrentText = text;
+  _ttsCurrentStarted = false;
+  _ttsRetryCount = 0;
+  _speakOne(text);
+}
+
+/** 朗读单条；文字在开始朗读时同步更新；Via 静默失败时重试一次 */
+function _speakOne(text) {
   try {
     speechSynthesis.resume();
-    // 如果正在说话，先 cancel 再说新的（仅队列积压时触发）
+    // 若上一条还在说（极少情况），先取消再说新的
     if (speechSynthesis.speaking) speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
     u.lang = 'zh-CN'; u.rate = 1.0; u.pitch = 1.0;
     // 只强制指定中文语音；找不到时让浏览器按 lang 自动选（避免 Via 等设备因默认英文语音而不出声）
     if (_ttsZhVoice) u.voice = _ttsZhVoice;
-    u.onerror = (e) => {
-      console.warn('[TTS] 合成失败:', e && e.error || 'unknown');
-      setTimeout(_ttsDrain, 200);
-    };
-    u.onend = () => { setTimeout(_ttsDrain, 120); };   // 条播之间小间隔，更稳定
-    u.onstart = () => { _ttsUnlocked = true; };
+    u.onerror = () => { console.warn('[TTS] 合成失败'); _afterUtterance(); };
+    u.onend = () => { _afterUtterance(); };
+    u.onstart = () => { _ttsUnlocked = true; _ttsCurrentStarted = true; };
     speechSynthesis.speak(u);
-    // 兜底：某些浏览器会静默丢弃 utterance（onend/onerror 都不触发），500ms 后若没继续则强制推进
+    // 文字与语音同步：开始朗读即更新展示文字
+    _currentAnnText = text;
+    const el = $('#ann-text'); if (el) el.textContent = text;
+    // Via 兜底：1s 后仍未真正开始朗读（静默失败），重试一次；再失败则跳过本条继续后续
     setTimeout(() => {
-      if (!speechSynthesis.speaking && _ttsQueue.length) _ttsDrain();
-    }, 700);
+      if (!_ttsDraining || _ttsCurrentText !== text) return;
+      if (!_ttsCurrentStarted && !speechSynthesis.speaking) {
+        if (_ttsRetryCount < 1) { _ttsRetryCount++; _speakOne(text); }
+        else { _ttsRetryCount = 0; _ttsCurrentText = null; _afterUtterance(); }
+      } else { _ttsRetryCount = 0; }
+    }, 1000);
   } catch (e) {
     console.warn('[TTS] 异常:', e && e.message || e);
-    setTimeout(_ttsDrain, 200);
+    _afterUtterance();
   }
 }
 
-/** 强制停止当前播报并清空队列（用户操作时保证音文同步） */
+/** 一条朗读结束（onend/onerror）后推进到下一条 */
+function _afterUtterance() {
+  _ttsRetryCount = 0;
+  _ttsCurrentText = null;
+  setTimeout(_ttsDrain, 120);
+}
+
+/** 强制停止当前播报并清空队列（用户手动操作时保证音文同步） */
 function stopAnnounce() {
   _ttsQueue = [];
   _ttsDraining = false;
+  _ttsCurrentText = null;
+  _ttsCurrentStarted = false;
+  _ttsRetryCount = 0;
   if ('speechSynthesis' in window) try { speechSynthesis.cancel(); } catch (_) {}
 }
 
