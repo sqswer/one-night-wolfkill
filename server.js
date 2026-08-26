@@ -1172,6 +1172,18 @@ function fileHash(p) {
   try { return crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex').slice(0, 8); } catch (_) { return '0'; }
 }
 
+// 全局资源版本号：每次部署/重启都不同，拼到静态资源 URL 上形成 cache-busting，
+// 彻底解决“换了头像但浏览器/平台仍显示旧图”的强缓存问题。
+function getAssetVer() {
+  try {
+    const { execSync } = require('child_process');
+    const h = execSync('git rev-parse --short HEAD', { cwd: __dirname }).toString().trim();
+    if (h) return h;
+  } catch (_) {}
+  return String(Date.now());
+}
+const ASSET_VER = getAssetVer();
+
 function serveStatic(req, res, pathname) {
   let f = pathname === '/' ? '/index.html' : pathname;
   const fp = path.join(PUBLIC_DIR, path.normalize(f).replace(/^(\.\.[/\\])+/, ''));
@@ -1192,11 +1204,16 @@ function serveStatic(req, res, pathname) {
         try { const js = fs.readFileSync(path.join(PUBLIC_DIR, src), 'utf8').replace(/<\/script/gi, '<\\/script'); return `<script>\n${js}\n</script>`; } catch (_) { return m; }
       });
       data = Buffer.from(html, 'utf8');
+      // 注入资源版本号，供前端拼到头像等静态资源 URL 上做 cache-busting
+      data = Buffer.concat([Buffer.from(`<script>window.__ASSET_VER__=${JSON.stringify(ASSET_VER)};</script>`), data]);
       headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
     } else if (ext === '.js' || ext === '.css') {
       headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
     } else {
-      headers['Cache-Control'] = 'public, max-age=86400';
+      // 静态资源（含角色头像 PNG）一律 no-cache，配合 URL 上的版本号 ?v= 实现 cache-busting：
+      // 文件未变→版本号不变→浏览器命中本地缓存（条件请求 304 不重传）；
+      // 文件已变→版本号改变→URL 改变→强制重新拉取，杜绝“更新后仍显示旧图”。
+      headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
     }
     res.writeHead(200, headers);
     res.end(data);

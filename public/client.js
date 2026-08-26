@@ -4,6 +4,11 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => document.querySelectorAll(s);
 
+// 资源版本号（由服务端注入 window.__ASSET_VER__），拼到头像等静态资源 URL 上做 cache-busting，
+// 避免浏览器/平台强缓存导致“换了头像仍显示旧图”。
+const ASSET_VER = (typeof window !== 'undefined' && window.__ASSET_VER__) || '';
+const assetUrl = (p) => ASSET_VER ? `${p}?v=${ASSET_VER}` : p;
+
 let STATE = {
   token: localStorage.getItem('oww_token') || null,
   code: localStorage.getItem('oww_code') || null,
@@ -488,7 +493,7 @@ function renderGame(s) {
       const key = s.you.role.key;
       iconEl.onerror = () => { iconEl.style.display = 'none'; const fb = $('#role-icon-fallback'); if (fb) { fb.textContent = (s.you.role.name || '?')[0]; fb.style.display = 'flex'; } console.warn('[role-icon] 加载失败:', key); };
       iconEl.onload = () => { const fb = $('#role-icon-fallback'); if (fb) fb.style.display = 'none'; };
-      iconEl.src = `/assets/role-icons/${key}/icon.png`;
+      iconEl.src = assetUrl(`/assets/role-icons/${key}/icon.png`);
       iconEl.alt = s.you.role.name;
     }
     $('#role-name').textContent = s.you.role.name;
@@ -1276,7 +1281,7 @@ function renderCodex() {
   body.innerHTML = list.map(r => {
     const tm = CODEX_TEAMS.find(t => t.key === r.team) || { cls: '' };
     const wake = r.wake ? '需唤醒' : '不唤醒';
-    const iconUrl = `assets/role-icons/${r.key}/icon.png`;
+    const iconUrl = assetUrl(`assets/role-icons/${r.key}/icon.png`);
     return `<div class="codex-card ${tm.cls}">
       <div class="codex-card-head">
         <img class="codex-icon" src="${iconUrl}" alt="${escapeHtml(r.name)}" onerror="this.style.display='none'" />
