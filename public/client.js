@@ -119,6 +119,13 @@ function connectSSE() {
   es.onopen = () => $('#conn-dot').classList.add('on');
   es.onerror = () => $('#conn-dot').classList.remove('on');
   es.addEventListener('state', (e) => { onState(JSON.parse(e.data)); });
+  es.addEventListener('reset', () => {
+    // 新一局开始：清空播报历史与语音队列/去重，必须在开场播报之前完成
+    _ttsSeq++;                   // 作废在途的 onend/finish
+    clearAnnHistory();
+    stopAnnounce();
+    _ttsLastEnqueued = '';
+  });
   es.addEventListener('speak', (e) => {
     const text = JSON.parse(e.data).text;
     speakAnnounce(text);   // speak 事件代表一条新播报，入队依次完整朗读（上帝视角）
@@ -146,15 +153,10 @@ const PHASE_NAME = {
 
 let _lastPhase = null;
 function onState(s) {
-  const wasLobby = _lastPhase === 'lobby';
   STATE.data = s;
   voiceApplyPhase(s.phase);
-  // 新一局开始时清空播报历史与语音队列/去重，避免旧消息或上一轮去重影响本轮
-  if (wasLobby && s.phase !== 'lobby') {
-    clearAnnHistory();
-    stopAnnounce();
-    _ttsLastEnqueued = '';
-  }
+  // 注：播报历史与语音队列的清空改由服务端 startGame 时发的 `reset` 事件负责，
+  // 不能在 lobby→night 的 state 里清，否则会把「游戏开始/天黑/狼人/爪牙」等开场播报一起删掉。
   _lastPhase = s.phase;
   if (s.phase === 'lobby') { renderLobby(s); showScreen('lobby'); }
   else { showScreen('game'); renderGame(s); }
@@ -838,6 +840,8 @@ let _ttsSupported = ('speechSynthesis' in window);
 let _ttsCurrentText = null;    // 当前正在朗读的文本（供静默失败重试判断）
 let _ttsCurrentStarted = false;// 当前 utterance 是否已真正开始（onstart）
 let _ttsRetryCount = 0;        // 当前语句静默失败重试次数
+let _ttsWatchdog = null;        // 单条朗读的超时看门狗（防 onend 不触发导致队列卡死）
+let _ttsSeq = 0;                 // 朗读序列号：cancel() 触发的旧 onend 不会误推进队列
 
 function _ttsLoadVoices() {
   try {
@@ -920,8 +924,6 @@ function speakAnnounce(text) {
   if (!ttsOn || !('speechSynthesis' in window)) return;
   // 上帝视角：顺序入队，由 _ttsDrain 逐条完整朗读（含开场、各角色睁眼/闭眼提示）
   _ttsQueue.push(text);
-  // 未解锁期间限制队列长度，避免过度堆积；unlock 后从头部继续朗读
-  if (_ttsQueue.length > 8) _ttsQueue.shift();
   if (!_ttsDraining) _ttsDrain();
 }
 
@@ -949,30 +951,26 @@ function clearAnnHistory() {
   if (el) el.innerHTML = '';
 }
 
-/** 从队列取出一条并播放，播完自动取下一条（上帝视角：每条都完整读完） */
+/** 从队列取出一条并播放，播完自动取下一条（上帝视角：每条都完整读完）
+ *  未解锁（用户尚未交互）时保留队列内容、不取出，等解锁后由 unlockTTS 触发继续；
+ *  这样开场播报（游戏开始/天黑/狼人/爪牙…）会按到达顺序完整保留，解锁后依次读出。 */
 function _ttsDrain() {
-  if (!_ttsQueue.length) { _ttsDraining = false; _ttsCurrentText = null; return; }
-  if (_ttsDraining) return; // 已有 drain 在跑，新入队的条目会被它一并处理
+  if (!_ttsQueue.length) { _ttsDraining = false; return; }
+  if (_ttsDraining) return;            // 已有 drain 在跑，新入队的条目会被它一并处理
+  if (!_ttsUnlocked) return;           // 未解锁：保留队列，等手势解锁后继续（不丢、不乱序）
   _ttsDraining = true;
   if (!_ttsReady) _ttsLoadVoices();
   const text = _ttsQueue.shift();
-  _ttsCurrentText = text;
-  _ttsCurrentStarted = false;
-  _ttsRetryCount = 0;
   _speakOne(text);
 }
 
 /** 朗读单条；文字已由 speakAnnounce 先行展示，此处只负责「出声」。
- *  未解锁（用户尚未交互）时把本条放回队列头部，等解锁后继续朗读，不丢弃。 */
+ *  关键兜底：部分 WebView（如 Via）onend/onerror 不触发，会在读完第一条后卡死队列；
+ *  这里按文本长度估算时长，超时强制推进，保证后续播报不被丢弃。 */
 function _speakOne(text) {
-  // 尚未解锁：语音无法播放，把本条塞回队列头部，等用户手势解锁后自动续播
-  if (!_ttsUnlocked) {
-    _ttsQueue.unshift(text);
-    _ttsCurrentText = null;
-    _ttsDraining = false;
-    return;
-  }
+  if (!('speechSynthesis' in window)) { _afterUtterance(); return; }
   try {
+    const mySeq = ++_ttsSeq;   // 序列号：cancel() 触发的旧 onend 不会误推进队列
     speechSynthesis.resume();
     // 若上一条还在说（极少情况），先取消再说新的
     if (speechSynthesis.speaking) speechSynthesis.cancel();
@@ -980,18 +978,19 @@ function _speakOne(text) {
     u.lang = 'zh-CN'; u.rate = 1.0; u.pitch = 1.0;
     // 只强制指定中文语音；找不到时让浏览器按 lang 自动选（避免 Via 等设备因默认英文语音而不出声）
     if (_ttsZhVoice) u.voice = _ttsZhVoice;
-    u.onerror = () => { console.warn('[TTS] 合成失败'); _afterUtterance(); };
-    u.onend = () => { _afterUtterance(); };
-    u.onstart = () => { _ttsUnlocked = true; _ttsCurrentStarted = true; };
+    let finished = false;
+    const finish = () => {
+      if (mySeq !== _ttsSeq) return;       // 已被新一条或 reset 取代，忽略
+      if (finished) return; finished = true;
+      clearTimeout(_ttsWatchdog); _afterUtterance();
+    };
+    u.onerror = finish;
+    u.onend = finish;
+    u.onstart = () => { _ttsUnlocked = true; };
     speechSynthesis.speak(u);
-    // Via 兜底：1s 后仍未真正开始朗读（静默失败），重试一次；再失败则跳过本条继续后续
-    setTimeout(() => {
-      if (!_ttsDraining || _ttsCurrentText !== text) return;
-      if (!_ttsCurrentStarted && !speechSynthesis.speaking) {
-        if (_ttsRetryCount < 1) { _ttsRetryCount++; _speakOne(text); }
-        else { _ttsRetryCount = 0; _ttsCurrentText = null; _afterUtterance(); }
-      } else { _ttsRetryCount = 0; }
-    }, 1000);
+    // 兜底看门狗：若 onend 未触发（Via 已知问题），按文本长度估算时长后强制推进，避免队列卡死
+    const est = Math.max(1600, text.length * 230 + 900);
+    _ttsWatchdog = setTimeout(finish, est);
   } catch (e) {
     // speak 抛异常（常见于未解锁自动播放策略）：文字已展示，仅跳过本条语音继续后续
     console.warn('[TTS] 异常:', e && e.message || e);
@@ -999,20 +998,21 @@ function _speakOne(text) {
   }
 }
 
-/** 一条朗读结束（onend/onerror）后推进到下一条 */
+/** 一条朗读结束（onend/onerror/看门狗）后推进到下一条 */
 function _afterUtterance() {
-  _ttsRetryCount = 0;
-  _ttsCurrentText = null;
+  _ttsDraining = false;
   setTimeout(_ttsDrain, 120);
 }
 
 /** 强制停止当前播报并清空队列（用户手动操作时保证音文同步） */
 function stopAnnounce() {
+  _ttsSeq++;                     // 作废在途的 onend/finish，避免误推进
   _ttsQueue = [];
   _ttsDraining = false;
   _ttsCurrentText = null;
   _ttsCurrentStarted = false;
   _ttsRetryCount = 0;
+  clearTimeout(_ttsWatchdog);
   if ('speechSynthesis' in window) try { speechSynthesis.cancel(); } catch (_) {}
 }
 

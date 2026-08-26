@@ -403,6 +403,10 @@ function startGame(room) {
   room.announce = '';
   for (const p of room.players) p.ready = false;
 
+  // 先通知客户端重置播报历史与语音队列（务必在任意 announce 之前发出，
+  // 否则开场播报「游戏开始/天黑/狼人/爪牙」会被客户端在 lobby→night 切换时误清）
+  broadcast(room, 'reset', {});
+
   const presetName = (room.roleDeck && room.roleDeck.length)
     ? `自定义阵容（${room.roleDeck.length} 张）`
     : (PRESETS.find(x => x.id === room.presetId) || PRESETS[0]).name;
