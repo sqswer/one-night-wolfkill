@@ -9,6 +9,11 @@ const path = require('path');
 const crypto = require('crypto');
 const url = require('url');
 
+// 服务端 TTS（兜底语音）：本地无语音引擎的浏览器（如 via、小米自带浏览器）由服务端合成音频后播放。
+// 模块内部懒加载 edge-tts，缺失时 available() 为 false，由客户端降级为纯文字，不中断游戏。
+let _tts = null;
+try { _tts = require('./tts'); } catch (_) { _tts = null; }
+
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
@@ -1290,6 +1295,23 @@ const server = http.createServer((req, res) => {
       const pp = findPlayer(room, token); if (pp) pp.connected = room.sse.some(c => c.token === token);
       if (room.voice.has(token)) { room.voice.delete(token); broadcast(room, 'voice', { seats: voiceSeats(room) }); }
     });
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/tts') {
+    const text = (parsed.query.text || '').toString();
+    if (!text || text.length > 500) { res.writeHead(400); res.end('bad text'); return; }
+    if (!_tts || !_tts.available()) { res.writeHead(501); res.end('TTS 未启用'); return; }
+    const voice = (parsed.query.voice || '').toString() || undefined;
+    _tts.synthesize(text, voice).then(buf => {
+      res.writeHead(200, {
+        'Content-Type': 'audio/mpeg',
+        'Content-Length': buf.length,
+        'Cache-Control': 'public, max-age=86400',
+        'X-Accel-Buffering': 'no'
+      });
+      res.end(buf);
+    }).catch(e => { res.writeHead(502); res.end('TTS 失败: ' + (e && e.message || e)); });
     return;
   }
 

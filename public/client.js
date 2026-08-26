@@ -876,6 +876,12 @@ let _ttsRetryCount = 0;        // 当前语句静默失败重试次数
 let _ttsWatchdog = null;        // 单条朗读的超时看门狗（防 onend 不触发导致队列卡死）
 let _ttsStartWatchdog = null;   // 检测 speak 是否真正启动的看门狗
 let _ttsSeq = 0;                 // 朗读序列号：cancel() 触发的旧 onend 不会误推进队列
+let _audioEl = null;             // 服务端 TTS 兜底用的 <audio> 元素（本地无引擎时播放服务端合成的音频）
+let _serverTtsState = null;      // 服务端 TTS 可用性：null=未知, true=可用, false=不可用（失败一次后不再重试）
+let _serverTtsWarned = false;    // 服务端 TTS 不可用提示是否已弹过
+let _localTtsFailed = false;     // 本地语音引擎是否确认不可用（用于提示文案）
+// 服务端 TTS 语音名（与服务端 tts.js 的 DEFAULT_VOICE 对应；如需切换男声可改为 'zh-CN-YunxiNeural'）
+const TTS_VOICE = 'zh-CN-XiaoxiaoNeural';
 
 function _ttsLoadVoices() {
   try {
@@ -928,9 +934,12 @@ function unlockTTS() {
       if (_ttsUnlocked) return;
       _ttsUnlocked = true;
       _ttsDrain();
+      // 本地确实无可用语音引擎（如 via / 小米自带浏览器）：提示将走服务端 TTS 兜底，
+      // 若服务端也不可用，_speakServer 会另行提示“仅文字显示”。
       if (!_ttsReady && !_ttsWarned) {
         _ttsWarned = true;
-        toast('当前浏览器可能无法语音播报，已改为文字显示。建议用 Chrome / Edge 获得语音。');
+        _localTtsFailed = true;
+        toast('本地无语音引擎，正在尝试服务端语音（需服务器联网）；若不可用将仅显示文字。');
       }
     }, 1500);
   } catch (_) { _ttsUnlocked = true; _ttsDrain(); }
@@ -951,17 +960,17 @@ function speakAnnounce(text, step, kind, stage, roleName) {
   _ttsLastEnqueued = text;
   // 上帝视角：顺序入队（携带步数/类型/阶段/角色名，供音文同步时驱动夜间 UI 揭示），由 _ttsDrain 逐条完整朗读
   _ttsQueue.push({ text, step: step || 0, kind: kind || null, stage: stage || null, roleName: roleName || null });
-  // 未开启 TTS 或尚未通过手势解锁时，文字立即展示（兜底/手动关闭语音时仍可阅读）；
-  // 此处在同一时刻同步追加播报记录(#ann-history)，与文字保持一致，避免记录提前走完
-  if (!ttsOn || !_ttsUnlocked || !('speechSynthesis' in window)) {
+  // 语音关闭：文字立即展示，且「闭眼」播报视为已展示直接回执服务端推进（无音频可听，靠节奏兜底）
+  if (!ttsOn) {
     showAnnItem(text, step, kind, stage, roleName);
-    // 语音未实际出声：当前「闭眼」播报视为已展示，直接回执服务端推进夜晚（与开启语音时 onend 回执等价）
     if (kind === 'close') sendNightAck();
+    return;
   }
-  // 语音：未开启或浏览器不支持时不再进一步处理
-  if (!ttsOn || !('speechSynthesis' in window)) return;
-  // 若尚未解锁，自动尝试一次解锁兜底：部分浏览器在用户未交互前会静默阻塞 speak，
-  // 触发 unlockTTS 的 1.5s 兜底后队列仍会继续推进，保证文字/语音不会卡丢。
+  // 语音开启：文字先展示（不依赖音频是否就绪），保证「文字不晚于语音」；
+  // 但「闭眼」回执(nightAck) 不放这里——交给音频真正结束（本地 onend 或服务端音频 ended）或 4.5s 兜底定时器，
+  // 避免本地无引擎的浏览器(via/小米)在还没听到时就推进夜晚。
+  showAnnItem(text, step, kind, stage, roleName);
+  // 若尚未解锁，自动尝试一次解锁兜底：部分浏览器在用户未交互前会静默阻塞 speak。
   if (!_ttsUnlocked && !_ttsAutoUnlocking) {
     _ttsAutoUnlocking = true;
     unlockTTS();
@@ -1083,7 +1092,30 @@ function _ttsDoSpeak(text, attempt) {
     _afterUtterance();
   }
 }
-function _speakOne(text) { _ttsRetryCount = 0; _ttsCurrentText = text; _ttsDoSpeak(text, 0); }
+function _speakOne(text) {
+  _ttsRetryCount = 0; _ttsCurrentText = text;
+  // 本地语音引擎可用（有中文语音）→ 走浏览器内置 Web Speech；否则（via/小米等无引擎）→ 走服务端 TTS 兜底
+  const localOk = _ttsSupported && _ttsVoices.length > 0;
+  if (localOk) _ttsDoSpeak(text, 0);
+  else _speakServer(text);
+}
+
+/** 服务端 TTS 兜底：本地无语音引擎时，从 /api/tts 拉取合成的 mp3 用 <audio> 播放。
+ *  音频 ended（或 play 被拒/出错）→ 走与本地 onend 相同的 _afterUtterance 流程（含「闭眼」回执 nightAck）；
+ *  若服务端 TTS 不可用，则标记失败、仅文字显示，绝不卡住队列。 */
+function _speakServer(text) {
+  if (_serverTtsState === false) { _afterUtterance(); return; }
+  if (!_audioEl) { _audioEl = new Audio(); _audioEl.preload = 'auto'; }
+  const u = '/api/tts?text=' + encodeURIComponent(text) + '&voice=' + encodeURIComponent(TTS_VOICE);
+  const onEnd = () => { _cleanupAudio(); _serverTtsState = true; _afterUtterance(); };
+  const onErr = () => { _cleanupAudio(); if (_serverTtsState !== false) { _serverTtsState = false; if (!_serverTtsWarned) { _serverTtsWarned = true; toast('服务端语音不可用，已改为文字显示。建议用 Chrome / Edge 获得语音。'); } } _afterUtterance(); };
+  function _cleanupAudio() { if (_audioEl) { _audioEl.removeEventListener('ended', onEnd); _audioEl.removeEventListener('error', onErr); } }
+  _audioEl.addEventListener('ended', onEnd);
+  _audioEl.addEventListener('error', onErr);
+  _audioEl.src = u;
+  const p = _audioEl.play();
+  if (p && p.catch) p.catch(() => { _cleanupAudio(); if (_serverTtsState !== false) _serverTtsState = false; _afterUtterance(); });
+}
 
 /** 一条朗读结束（onend/onerror/看门狗）后推进到下一条 */
 function _afterUtterance() {
@@ -1109,6 +1141,7 @@ function stopAnnounce() {
   clearTimeout(_ttsStartWatchdog);
   if (_nightAckFallback) { clearTimeout(_nightAckFallback); _nightAckFallback = null; }
   if ('speechSynthesis' in window) try { speechSynthesis.cancel(); } catch (_) {}
+  if (_audioEl) { try { _audioEl.pause(); _audioEl.removeAttribute('src'); _audioEl.load(); } catch (_) {} }
 }
 
 $('#btn-tts').onclick = () => {
