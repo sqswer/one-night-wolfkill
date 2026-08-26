@@ -1,4 +1,4 @@
-# 依赖（本项目零依赖，仅为保险）
+﻿# 依赖（本项目零依赖，仅为保险）
 node_modules/
 
 # 临时目录（图片生成等工作目录）
@@ -16,3 +16,7 @@ Thumbs.db
 .env.*
 _validate_presets
 _validate_presets.js
+
+# 本地文档，仅本地更新，不推送远程
+部署指南.md
+官方规则审计报告.md

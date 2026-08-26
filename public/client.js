@@ -142,6 +142,10 @@ function connectSSE() {
   es.addEventListener('speech', (e) => { addSpeech(JSON.parse(e.data)); });
   es.addEventListener('hunter', (e) => { const d = JSON.parse(e.data); toast(`猎人 ${d.name} 被放逐，可开枪`); });
   es.addEventListener('voice', (e) => { onVoiceState((JSON.parse(e.data).seats) || []); });
+  es.addEventListener('voice_invite', (e) => {
+    const d = JSON.parse(e.data);
+    if (!voiceOn) showVoiceInvite(d.fromName);
+  });
   es.addEventListener('signal', (e) => { const d = JSON.parse(e.data); onVoiceSignal(d.from, d.data); });
 }
 
@@ -841,6 +845,7 @@ let _ttsCurrentText = null;    // 当前正在朗读的文本（供静默失败�
 let _ttsCurrentStarted = false;// 当前 utterance 是否已真正开始（onstart）
 let _ttsRetryCount = 0;        // 当前语句静默失败重试次数
 let _ttsWatchdog = null;        // 单条朗读的超时看门狗（防 onend 不触发导致队列卡死）
+let _ttsStartWatchdog = null;   // 检测 speak 是否真正启动的看门狗
 let _ttsSeq = 0;                 // 朗读序列号：cancel() 触发的旧 onend 不会误推进队列
 
 function _ttsLoadVoices() {
@@ -917,13 +922,15 @@ function speakAnnounce(text) {
   _ttsLastEnqueued = text;
   // 历史记录始终保留（文字展示不丢）
   addAnnHistory(text);
-  // 关键：无论语音是否可用、是否已解锁，都立即把文字展示到播报区（保证「每条播报都有对应文字」）
-  _currentAnnText = text;
-  const annEl = $('#ann-text'); if (annEl) annEl.textContent = text;
-  // 语音：未开启或浏览器不支持时不再进一步处理（文字已展示）
-  if (!ttsOn || !('speechSynthesis' in window)) return;
   // 上帝视角：顺序入队，由 _ttsDrain 逐条完整朗读（含开场、各角色睁眼/闭眼提示）
   _ttsQueue.push(text);
+  // 未开启 TTS 或尚未通过手势解锁时，文字立即展示（兜底/手动关闭语音时仍可阅读）
+  if (!ttsOn || !_ttsUnlocked || !('speechSynthesis' in window)) {
+    _currentAnnText = text;
+    const annEl = $('#ann-text'); if (annEl) annEl.textContent = text;
+  }
+  // 语音：未开启或浏览器不支持时不再进一步处理
+  if (!ttsOn || !('speechSynthesis' in window)) return;
   if (!_ttsDraining) _ttsDrain();
 }
 
@@ -961,13 +968,17 @@ function _ttsDrain() {
   _ttsDraining = true;
   if (!_ttsReady) _ttsLoadVoices();
   const text = _ttsQueue.shift();
+  // 文字与语音同步：轮到本条朗读时才把播报区切换到本条文字
+  _currentAnnText = text;
+  const annEl = $('#ann-text'); if (annEl) annEl.textContent = text;
   _speakOne(text);
 }
 
-/** 朗读单条；文字已由 speakAnnounce 先行展示，此处只负责「出声」。
- *  关键兜底：部分 WebView（如 Via）onend/onerror 不触发，会在读完第一条后卡死队列；
- *  这里按文本长度估算时长，超时强制推进，保证后续播报不被丢弃。 */
-function _speakOne(text) {
+/** 朗读单条；文字与播报区已由 _ttsDrain 同步切换，此处只负责「出声」。
+ *  关键兜底：部分 WebView（如 Via / 小米浏览器）onstart/onend/onerror 不触发，会在读完第一条后卡死队列；
+ *  这里按文本长度估算时长，超时强制推进，保证后续播报不被丢弃。
+ *  另加「启动看门狗」：若 speak 后短时间内未触发 onstart，则静默重试 1 次，解决部分浏览器首次 speak 失败的问题。 */
+function _ttsDoSpeak(text, attempt) {
   if (!('speechSynthesis' in window)) { _afterUtterance(); return; }
   try {
     const mySeq = ++_ttsSeq;   // 序列号：cancel() 触发的旧 onend 不会误推进队列
@@ -979,24 +990,34 @@ function _speakOne(text) {
     // 只强制指定中文语音；找不到时让浏览器按 lang 自动选（避免 Via 等设备因默认英文语音而不出声）
     if (_ttsZhVoice) u.voice = _ttsZhVoice;
     let finished = false;
+    _ttsCurrentStarted = false;
     const finish = () => {
       if (mySeq !== _ttsSeq) return;       // 已被新一条或 reset 取代，忽略
       if (finished) return; finished = true;
-      clearTimeout(_ttsWatchdog); _afterUtterance();
+      clearTimeout(_ttsWatchdog);
+      clearTimeout(_ttsStartWatchdog);
+      _afterUtterance();
     };
     u.onerror = finish;
     u.onend = finish;
-    u.onstart = () => { _ttsUnlocked = true; };
+    u.onstart = () => { _ttsUnlocked = true; _ttsCurrentStarted = true; clearTimeout(_ttsStartWatchdog); };
     speechSynthesis.speak(u);
     // 兜底看门狗：若 onend 未触发（Via 已知问题），按文本长度估算时长后强制推进，避免队列卡死
     const est = Math.max(1600, text.length * 230 + 900);
     _ttsWatchdog = setTimeout(finish, est);
+    // 启动看门狗：部分浏览器 speak 后没有 onstart，静默失败，重试一次
+    _ttsStartWatchdog = setTimeout(() => {
+      if (_ttsCurrentStarted) return;
+      if (attempt < 1) { _ttsDoSpeak(text, attempt + 1); }
+      else { finish(); }
+    }, 900);
   } catch (e) {
     // speak 抛异常（常见于未解锁自动播放策略）：文字已展示，仅跳过本条语音继续后续
     console.warn('[TTS] 异常:', e && e.message || e);
     _afterUtterance();
   }
 }
+function _speakOne(text) { _ttsRetryCount = 0; _ttsCurrentText = text; _ttsDoSpeak(text, 0); }
 
 /** 一条朗读结束（onend/onerror/看门狗）后推进到下一条 */
 function _afterUtterance() {
@@ -1013,6 +1034,7 @@ function stopAnnounce() {
   _ttsCurrentStarted = false;
   _ttsRetryCount = 0;
   clearTimeout(_ttsWatchdog);
+  clearTimeout(_ttsStartWatchdog);
   if ('speechSynthesis' in window) try { speechSynthesis.cancel(); } catch (_) {}
 }
 
@@ -1029,13 +1051,16 @@ $('#btn-tts').onclick = () => {
 };
 
 // --------------------------- 房间实时语音（WebRTC Mesh） ---------------------------
-// 信令经服务器 SSE 转发（voice / signal 事件），音频流走浏览器 P2P，不经过服务器。
+// 信令经服务器 SSE 转发（voice / signal / voice_invite 事件），音频流走浏览器 P2P，不经过服务器。
 // 约定：座位号小的一方作为发起方（创建 offer），避免双方同时 offer 冲突。
 const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 let voiceOn = false;          // 本地麦克风是否已加入通话
 let localStream = null;       // 本地麦克风流
 let voicePeers = new Map();   // seat -> { pc, audio, pendingCandidates }
 let voiceNightMuted = false;  // 夜晚/黄昏自动静音
+let voiceLastSeats = [];      // 最近一次收到的通话成员列表，用于断线后重连
+let voicePendingOffers = [];  // localStream 未就绪时暂存的 offer
+let voiceInviteTimer = null;  // 邀请弹窗自动关闭计时器
 
 function voiceSend(subtype, extra) {
   api('/api/action', { token: STATE.token, type: 'voice', payload: Object.assign({ subtype }, extra || {}) });
@@ -1057,8 +1082,21 @@ function voiceMakePeer(seat) {
     audio.srcObject = stream;
     audio.play().catch(() => {});
   };
+  // 稳定性：ICE 失败时自动重启候选协商；连接彻底断开后尝试重连
+  pc.oniceconnectionstatechange = () => {
+    if (pc.iceConnectionState === 'failed') {
+      try { pc.restartIce(); } catch (_) {}
+    }
+  };
   pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') voiceClosePeer(seat);
+    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+      if (voiceOn) {
+        // 延迟重连：让两端都进入干净状态后再重新发起
+        setTimeout(() => { voiceClosePeer(seat); onVoiceState(voiceLastSeats); }, 600);
+      } else {
+        voiceClosePeer(seat);
+      }
+    }
   };
   return peer;
 }
@@ -1076,7 +1114,6 @@ async function voiceInitiate(seat) {
   } catch (_) { voiceClosePeer(seat); }
 }
 
-let voicePendingOffers = []; // localStream 未就绪时暂存的 offer
 async function onVoiceSignal(from, data) {
   if (!data) return;
   let peer = voicePeers.get(from);
@@ -1124,12 +1161,15 @@ function voiceTeardown() {
   for (const seat of [...voicePeers.keys()]) voiceClosePeer(seat);
   if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
   voiceOn = false; voiceNightMuted = false;
+  voiceLastSeats = [];
+  hideVoiceInvite();
   renderVoice();
 }
 
 function onVoiceState(seats) {
+  voiceLastSeats = seats || [];
   const mySeat = STATE.seat;
-  const other = (seats || []).filter(s => s !== mySeat);
+  const other = voiceLastSeats.filter(s => s !== mySeat);
   for (const seat of [...voicePeers.keys()]) {
     if (!other.includes(seat)) voiceClosePeer(seat);
   }
@@ -1146,6 +1186,22 @@ function voiceApplyPhase(phase) {
   voiceNightMuted = isNight;
   if (localStream) localStream.getAudioTracks().forEach(t => { t.enabled = !isNight; });
   renderVoice();
+}
+
+// 语音通话邀请弹窗
+function showVoiceInvite(name) {
+  const modal = $('#voice-invite-modal');
+  const text = $('#voice-invite-text');
+  if (!modal || !text) return;
+  text.textContent = `🎙️ ${escapeHtml(name || '有人')} 邀请你加入语音通话`;
+  modal.classList.remove('hidden');
+  clearTimeout(voiceInviteTimer);
+  voiceInviteTimer = setTimeout(hideVoiceInvite, 15000); // 15 秒未响应自动收起
+}
+function hideVoiceInvite() {
+  const modal = $('#voice-invite-modal');
+  if (modal) modal.classList.add('hidden');
+  clearTimeout(voiceInviteTimer); voiceInviteTimer = null;
 }
 
 async function toggleVoice() {
@@ -1169,7 +1225,9 @@ async function toggleVoice() {
   voiceOn = true;
   renderVoice();
   voiceSend('join');
-  toast('已加入语音通话');
+  // 一方发起后，向房间内其他玩家弹出加入邀请
+  voiceSend('invite');
+  toast('已加入语音通话，已向其他玩家发送邀请');
 }
 
 function renderVoice(members) {
@@ -1192,6 +1250,8 @@ function renderVoice(members) {
   $('#voice-bar-status').textContent = txt;
 }
 $$('.voice-toggle').forEach(b => b.onclick = toggleVoice);
+$('#voice-invite-accept').onclick = () => { hideVoiceInvite(); toggleVoice(); };
+$('#voice-invite-decline').onclick = () => { hideVoiceInvite(); };
 
 // --------------------------- 角色图鉴 ---------------------------
 const CODEX_TEAMS = [

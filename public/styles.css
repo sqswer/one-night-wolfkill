@@ -348,6 +348,15 @@ select { appearance: none; -webkit-appearance: none; padding-right: 38px; }
   border: 1px solid var(--line-strong); opacity: 0; pointer-events: none; transition: .25s; z-index: 60; max-width: 84%; text-align: center; }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
+/* ---------- 语音通话邀请弹窗 ---------- */
+.modal-overlay { position: fixed; inset: 0; z-index: 90; background: rgba(4,7,14,.75); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  display: flex; align-items: center; justify-content: center; animation: fade .2s ease; padding: 16px; }
+.modal-box { background: var(--card); border: 1px solid var(--line-strong); border-radius: 18px; padding: 22px 20px 18px;
+  width: 100%; max-width: 320px; text-align: center; box-shadow: var(--shadow); }
+.modal-text { font-size: 16px; line-height: 1.5; margin-bottom: 18px; }
+.modal-btns { display: flex; gap: 10px; justify-content: center; }
+.modal-btns .btn { flex: 1; }
+
 /* ---------- 角色图鉴 ---------- */
 .codex-open { margin-top: 12px; }
 .codex-overlay { position: fixed; inset: 0; z-index: 80; background: rgba(4,7,14,.72); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);

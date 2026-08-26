@@ -21,28 +21,9 @@ node server.js
 
 > 无需 `npm install`，无需任何 API 密钥、无需联网即可游玩（语音为浏览器本地能力）。
 
-## 部署到公网（户外手机也能玩）
+## 角色头像风格
 
-> **2026-08 实测**：Koyeb（被收购无免费档）、Glitch（关停）、Render（要信用卡）、Hugging Face Spaces Docker/Gradio（需 PRO $9/月）——主流平台全部不可用。
->
-> **当前确认免卡免费方案：Bonto / SnapDeploy**（小平台，见下方 `部署指南.md`）。代码零改动，`server.js` 已读 `process.env.PORT`。
-
-### 快速部署：Bonto（推荐）
-
-1. 注册 https://bonto.dev （免卡，Node.js 原生运行）。
-2. Create New App，**绑定 Git 仓库** `https://github.com/sqswer/one-night-wolfkill.git`（分支 `main`），启动命令填 `node server.js` → Deploy。
-3. 之后**每次更新只需在控制台点「pull from remote」**即可拉取 GitHub 最新代码并自动重启——**无需手动上传文件**。
-4. 获得 `https://<app名>.bonto.run`，手机浏览器打开即可联机。
-
-> 实例空闲约 30 分钟会被回收（唤醒 ~2–5s）；首屏已做**内联优化**（CSS/JS 全部内联进 `index.html`，4 次请求压成 1 次），warm 加载约 1.5s。若更新后页面异常，硬刷新（Ctrl+Shift+R）一次清旧缓存即可。详见 `部署指南.md`。
-
-### 备选：自有服务器
-
-```bash
-git clone <你的仓库> && cd 一夜狼人杀在线网页版
-node server.js
-# 或 Docker：docker build -t oww . && docker run -d -p 3000:3000 oww
-```
+全部 33 个角色头像采用**统一日漫卡通风格**，与狼人、爪牙、预言家等核心角色保持一致的视觉语言：透明背景、半身头像、色彩明快、特征突出，确保手机小图也能一眼识别。新增/替换角色时，请沿用同一风格，避免不同生成模型混用导致画风割裂。
 
 ## 已实现功能
 
@@ -98,9 +79,8 @@ public/index.html    # 页面骨架（首页/大厅/游戏/角色图鉴弹窗）
 public/styles.css    # 手机优先样式
 public/roles.js      # 角色图鉴数据源（ROLE_LIB，33 角色结构化信息）
 public/client.js     # 状态同步、AI 播报员、行动UI、语音、投票、结果、角色图鉴渲染
-Dockerfile           # 容器镜像（node:20-alpine，SnapDeploy / 自有服务器通用）
-部署指南.md          # Bonto / SnapDeploy 免费免卡部署步骤（2026-08 实测）
-官方规则审计报告.md   # 基于官方规则书的角色库/流程/胜负审计结论
+Dockerfile           # 容器镜像（node:20-alpine）
+官方规则审计报告.md   # 基于官方规则书的角色库/流程/胜负审计结论（本地文档，不推送远程）
 test_flow.js         # 无头端到端测试（3 人自动走完一局，校验结果）
 test_bot.js          # 单人 + 机器人 全流程联调（建房→加满机器人→夜晚/投票→结算）
 ```
@@ -121,8 +101,7 @@ node test_flow.js M6        # 猎人阵容
 - 语音识别依赖浏览器支持（Chrome/Edge 体验最佳；Safari/Firefox 部分支持，可降级为纯文字）。
 - 房间数据存内存，服务器重启即清空（适合聚会一局制；如需持久化可接 SQLite）。
 - 化身幽灵/阿尔法狼等复杂机制做了**简化实现**（查看/交换），未完全复刻实体版全部细节。
-- 暂无「跨服公网匹配」，邀请需同一局域网或内网穿透（如 ngrok/cloudflared）。机器人补位已实现（见上表）。
-- Bonto 免费实例空闲约 30 分钟会被回收，唤醒首屏约 2–5s（已做内联优化降低其余耗时）。
+- 暂无「跨服公网匹配」，邀请需同一局域网。机器人补位已实现（见上表）。
 
 ## 参考成品
 

@@ -411,8 +411,8 @@ function startGame(room) {
     ? `自定义阵容（${room.roleDeck.length} 张）`
     : (PRESETS.find(x => x.id === room.presetId) || PRESETS[0]).name;
 
-  publicLog(room, `游戏开始 · 阵容【${presetName}】· 共 ${n} 人，中央 ${room.centerCount} 张底牌。`);
-  announce(room, `游戏开始。阵容：${presetName}。共 ${n} 位玩家，中央放置 ${room.centerCount} 张底牌。请各位查看自己的身份。`);
+  publicLog(room, '游戏开始，请各位查看自己的身份。');
+  announce(room, '游戏开始，请各位查看自己的身份。');
 
   // 发牌：每位玩家可见自己身份（通过私有信息）
   for (const p of room.players) {
@@ -722,7 +722,7 @@ function applyAction(room, action, subs) {
     const s = action.seats[0]; const t = subs[s].target;
     const a = room.currentRole[s], b = room.currentRole[t];
     room.currentRole[s] = b; room.currentRole[t] = a;
-    sendPrivate(room, room.players[s].token, `强盗：你与 ${seatName(room, t)} 交换身份，你现在是【${ROLES[b].name}】。`);
+    sendPrivate(room, room.players[s].token, `强盗：你与 ${seatName(room, t)} 交换身份，你换来的角色是【${ROLES[b].name}】。`);
   } else if (r === 'witch') {
     const s = action.seats[0]; const sub = subs[s];
     if (sub.center != null) sendPrivate(room, room.players[s].token, `女巫：你查看的中央底牌是【${ROLES[room.centerCards[sub.center].role].name}】。`);
@@ -1348,6 +1348,11 @@ const server = http.createServer((req, res) => {
         const sub = payload && payload.subtype;
         if (sub === 'join') { room.voice.add(token); broadcast(room, 'voice', { seats: voiceSeats(room) }); }
         else if (sub === 'leave') { room.voice.delete(token); broadcast(room, 'voice', { seats: voiceSeats(room) }); }
+        else if (sub === 'invite') {
+          // 发起者邀请房间内其他玩家加入语音通话
+          const payloadStr = `event: voice_invite\ndata: ${JSON.stringify({ fromSeat: p.seat, fromName: p.name })}\n\n`;
+          for (const c of room.sse) { if (c.token !== token) try { c.res.write(payloadStr); } catch (_) {} }
+        }
         else if (sub === 'signal') { const to = seatToToken(room, payload.to); if (to && to !== token) pushTo(room, to, 'signal', { from: p.seat, data: payload.data }); }
         break;
       }
