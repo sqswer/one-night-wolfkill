@@ -929,14 +929,12 @@ function speakAnnounce(text) {
   // 入队去重：与最近入队内容相同则跳过，避免重复播报（同一条播报被 state/speak 重复推送时）
   if (text === _ttsLastEnqueued) return;
   _ttsLastEnqueued = text;
-  // 历史记录始终保留（文字展示不丢）
-  addAnnHistory(text);
   // 上帝视角：顺序入队，由 _ttsDrain 逐条完整朗读（含开场、各角色睁眼/闭眼提示）
   _ttsQueue.push(text);
-  // 未开启 TTS 或尚未通过手势解锁时，文字立即展示（兜底/手动关闭语音时仍可阅读）
+  // 未开启 TTS 或尚未通过手势解锁时，文字立即展示（兜底/手动关闭语音时仍可阅读）；
+  // 此处在同一时刻同步追加播报记录(#ann-history)，与文字保持一致，避免记录提前走完
   if (!ttsOn || !_ttsUnlocked || !('speechSynthesis' in window)) {
-    _currentAnnText = text;
-    const annEl = $('#ann-text'); if (annEl) annEl.textContent = text;
+    showAnnItem(text);
   }
   // 语音：未开启或浏览器不支持时不再进一步处理
   if (!ttsOn || !('speechSynthesis' in window)) return;
@@ -970,6 +968,15 @@ function clearAnnHistory() {
 /** 从队列取出一条并播放，播完自动取下一条（上帝视角：每条都完整读完）
  *  未解锁（用户尚未交互）时保留队列内容、不取出，等解锁后由 unlockTTS 触发继续；
  *  这样开场播报（游戏开始/天黑/狼人/爪牙…）会按到达顺序完整保留，解锁后依次读出。 */
+
+/** 同步展示一条播报：更新播报员文字 + 追加到播报记录(#ann-history)。
+ *  两者在同一时刻发生，保证“播报记录”与语音/文字进度一致，不会提前走完。 */
+function showAnnItem(text) {
+  _currentAnnText = text;
+  const annEl = $('#ann-text'); if (annEl) annEl.textContent = text;
+  addAnnHistory(text);
+}
+
 function _ttsDrain() {
   if (!_ttsQueue.length) { _ttsDraining = false; return; }
   if (_ttsDraining) return;            // 已有 drain 在跑，新入队的条目会被它一并处理
@@ -978,8 +985,7 @@ function _ttsDrain() {
   if (!_ttsReady) _ttsLoadVoices();
   const text = _ttsQueue.shift();
   // 文字与语音同步：轮到本条朗读时才把播报区切换到本条文字
-  _currentAnnText = text;
-  const annEl = $('#ann-text'); if (annEl) annEl.textContent = text;
+  showAnnItem(text);
   _speakOne(text);
 }
 
@@ -1288,7 +1294,7 @@ function renderCodex() {
     const iconUrl = assetUrl(`assets/role-icons/${r.key}/icon.png`);
     return `<div class="codex-card ${tm.cls}">
       <div class="codex-card-head">
-        <img class="codex-icon" src="${iconUrl}" alt="${escapeHtml(r.name)}" onerror="this.style.display='none'" />
+        <img class="codex-icon" src="${iconUrl}" alt="${escapeHtml(r.name)}" loading="lazy" onerror="this.style.display='none'" />
         <span class="codex-name">${r.name}</span>
         <span class="codex-badges">
           <span class="codex-badge phase">${PHASE_BADGE[r.phase] || ''}</span>

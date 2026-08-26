@@ -530,7 +530,8 @@ function advanceQueue(room) {
       item.seats.forEach(seat => { if (reveal[seat]) sendPrivate(room, room.players[seat].token, reveal[seat]); });
     }
     pushState(room);
-    const delay = (item.stage === 'dusk') ? 2600 : 4200;
+    // 每个角色睁眼后停留 5 秒再闭眼，给玩家看清/听完播报的反应时间
+    const delay = 5000;
     room.nightTimer = setTimeout(() => closeAndAdvance(room, r), delay);
   }
 }
@@ -546,10 +547,13 @@ function closeAndAdvance(room, r) {
 // 需要输入的角色（含机器人自动提交）执行完毕后闭眼并推进
 function finishAutoAction(room, r) {
   applyAction(room, room.currentAction, room.currentAction.submissions);
-  announce(room, `请【${r.name}】闭眼。`);
   room.currentAction = null;
   pushState(room);
-  room.nightTimer = setTimeout(() => advanceQueue(room), 1800);
+  // 操作完成后停顿 5 秒（让玩家看清结果、语音/文字播报完整展示），再闭眼进入下一位
+  room.nightTimer = setTimeout(() => {
+    announce(room, `请【${r.name}】闭眼。`);
+    room.nightTimer = setTimeout(() => advanceQueue(room), 1500);
+  }, 5000);
 }
 
 function roleNeedsInput(role, room, seats) {
@@ -1187,7 +1191,7 @@ function getAssetVer() {
 }
 const ASSET_VER = getAssetVer();
 
-function serveStatic(req, res, pathname) {
+function serveStatic(req, res, pathname, isVersioned) {
   let f = pathname === '/' ? '/index.html' : pathname;
   const fp = path.join(PUBLIC_DIR, path.normalize(f).replace(/^(\.\.[/\\])+/, ''));
   if (!fp.startsWith(PUBLIC_DIR)) { res.writeHead(403); res.end('forbidden'); return; }
@@ -1213,10 +1217,15 @@ function serveStatic(req, res, pathname) {
     } else if (ext === '.js' || ext === '.css') {
       headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
     } else {
-      // 静态资源（含角色头像 PNG）一律 no-cache，配合 URL 上的版本号 ?v= 实现 cache-busting：
-      // 文件未变→版本号不变→浏览器命中本地缓存（条件请求 304 不重传）；
-      // 文件已变→版本号改变→URL 改变→强制重新拉取，杜绝“更新后仍显示旧图”。
-      headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
+      // 版本化资源（URL 带 ?v=，即内容稳定，如角色头像）：长缓存，图鉴/重复访问秒出，绝不反复重下
+      headers['Cache-Control'] = isVersioned ? 'public, max-age=86400' : 'no-cache, no-store, must-revalidate';
+    }
+    // 对未版本化的响应（首页 HTML / 内联 JS / CSS）加 ETag 协商缓存：
+    // 弱网/部署环境下重复访问返回 304（不重传），显著加快“首页→开局”的响应。
+    if (!isVersioned) {
+      const etag = crypto.createHash('sha256').update(data).digest('hex').slice(0, 16);
+      headers['ETag'] = etag;
+      if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers); res.end(); return; }
     }
     res.writeHead(200, headers);
     res.end(data);
@@ -1383,7 +1392,10 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  if (req.method === 'GET') return serveStatic(req, res, pathname);
+  if (req.method === 'GET') {
+    const isVersioned = !!(parsed.query && parsed.query.v);
+    return serveStatic(req, res, pathname, isVersioned);
+  }
   res.writeHead(405); res.end('method not allowed');
 });
 
