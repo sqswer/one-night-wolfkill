@@ -151,26 +151,28 @@ async function _synthesizeEdge(text, voice) {
   return audio;
 }
 
-// ---- provider 自动判定 ----
+// ---- provider 自动判定（运行时动态解析，安装 tts-bin 后无需重启即生效）----
 const _fetch = globalThis.fetch ? globalThis.fetch.bind(globalThis) : null;
-const PROVIDER = (() => {
-  const p = (process.env.TTS_PROVIDER || '').toLowerCase();
-  if (p) return p;
+function _resolveProvider() {
+  const forced = (process.env.TTS_PROVIDER || '').toLowerCase();
+  if (forced) return forced;
   if (_piperPresent()) return 'piper';
-  if (process.env.BAIDU_TTS_API_KEY) return 'baidu';
+  if (_baiduEnabled()) return 'baidu';
   return 'edge';
-})();
+}
+const PROVIDER = _resolveProvider(); // 仅供信息展示；实际以 _resolveProvider() 为准
 
 // ---- 公共接口 ----
 function available() {
-  if (PROVIDER === 'piper') return _piperPresent();
-  if (PROVIDER === 'baidu') return _baiduEnabled();
-  if (PROVIDER === 'edge') return !!_loadEdge();
+  const provider = _resolveProvider();
+  if (provider === 'piper') return _piperPresent();
+  if (provider === 'baidu') return _baiduEnabled();
+  if (provider === 'edge') return !!_loadEdge();
   return false;
 }
 
 function contentType() {
-  return PROVIDER === 'piper' ? 'audio/wav' : 'audio/mpeg';
+  return _resolveProvider() === 'piper' ? 'audio/wav' : 'audio/mpeg';
 }
 
 function _cacheKey(text, tag) {
@@ -178,7 +180,7 @@ function _cacheKey(text, tag) {
 }
 
 async function synthesize(text, voice) {
-  const provider = PROVIDER;
+  const provider = _resolveProvider();
   let tag, ext;
   if (provider === 'piper') { tag = 'piper'; ext = 'wav'; }
   else if (provider === 'baidu') { tag = 'baidu:' + (process.env.BAIDU_TTS_PER || '4'); ext = 'mp3'; }
