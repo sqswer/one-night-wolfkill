@@ -407,27 +407,30 @@ function startGame(room) {
   // 否则开场播报「游戏开始/天黑/狼人/爪牙」会被客户端在 lobby→night 切换时误清）
   broadcast(room, 'reset', {});
 
-  const presetName = (room.roleDeck && room.roleDeck.length)
-    ? `自定义阵容（${room.roleDeck.length} 张）`
-    : (PRESETS.find(x => x.id === room.presetId) || PRESETS[0]).name;
+  // 给客户端留出约 150ms 处理 reset（清空旧队列/历史），避免开场播报紧接 reset 被误清或吞掉
+  setTimeout(() => {
+    const presetName = (room.roleDeck && room.roleDeck.length)
+      ? `自定义阵容（${room.roleDeck.length} 张）`
+      : (PRESETS.find(x => x.id === room.presetId) || PRESETS[0]).name;
 
-  publicLog(room, '游戏开始，请各位查看自己的身份。');
-  announce(room, '游戏开始，请各位查看自己的身份。');
+    publicLog(room, '游戏开始，请各位查看自己的身份。');
+    announce(room, '游戏开始，请各位查看自己的身份。');
 
-  // 发牌：每位玩家可见自己身份（通过私有信息）
-  for (const p of room.players) {
-    const rk = room.currentRole[p.seat];
-    sendPrivate(room, p.token, `游戏开始时，你的身份是【${ROLES[rk].name}】（阵营：${teamName(ROLES[rk].team)}）。`);
-  }
-  // 被诅咒者：若狼人选择标记则变狼（此处仅提示）
-  if (hasDusk) {
-    room.phase = 'dusk';
-    setupStage(room, 'dusk');
-  } else {
-    room.phase = 'night';
-    setupStage(room, 'night');
-  }
-  pushState(room);
+    // 发牌：每位玩家可见自己身份（通过私有信息）
+    for (const p of room.players) {
+      const rk = room.currentRole[p.seat];
+      sendPrivate(room, p.token, `游戏开始时，你的身份是【${ROLES[rk].name}】（阵营：${teamName(ROLES[rk].team)}）。`);
+    }
+    // 被诅咒者：若狼人选择标记则变狼（此处仅提示）
+    if (hasDusk) {
+      room.phase = 'dusk';
+      setupStage(room, 'dusk');
+    } else {
+      room.phase = 'night';
+      setupStage(room, 'night');
+    }
+    pushState(room);
+  }, 150);
   return { ok: true };
 }
 
@@ -541,7 +544,8 @@ function closeAndAdvance(room, r) {
   announce(room, `请【${r.name}】闭眼。`);
   room.currentAction = null;
   pushState(room);
-  room.nightTimer = setTimeout(() => advanceQueue(room), 1500);
+  // 闭眼后统一停留 2 秒，再给下一位角色睁眼
+  room.nightTimer = setTimeout(() => advanceQueue(room), 2000);
 }
 
 // 需要输入的角色（含机器人自动提交）执行完毕后闭眼并推进
@@ -549,10 +553,11 @@ function finishAutoAction(room, r) {
   applyAction(room, room.currentAction, room.currentAction.submissions);
   room.currentAction = null;
   pushState(room);
-  // 操作完成后停顿 5 秒（让玩家看清结果、语音/文字播报完整展示），再闭眼进入下一位
+  // 操作完成后停顿 5 秒（让玩家看清结果、语音/文字播报完整展示），再闭眼；
+  // 闭眼后再统一停留 2 秒，给玩家反应时间，然后才进入下一位角色
   room.nightTimer = setTimeout(() => {
     announce(room, `请【${r.name}】闭眼。`);
-    room.nightTimer = setTimeout(() => advanceQueue(room), 1500);
+    room.nightTimer = setTimeout(() => advanceQueue(room), 2000);
   }, 5000);
 }
 
@@ -872,7 +877,7 @@ function startVote(room) {
   room.votes = {};
   room.voteTargetsOpen = true;
   room.discussionEndsAt = null;
-  announce(room, '发言结束，现在开始投票。投给你怀疑的人（不可投自己），也可选择「不投票」。若所有人都没投出有效票，则无人被放逐。');
+  announce(room, '发言结束，现在开始投票。');
   publicLog(room, '进入投票阶段。');
   // 保镖保护行动（机器人保镖自动保护，真人保镖由 UI 选择）
   const bodyguards = room.players.filter(p => room.currentRole[p.seat] === 'bodyguard');

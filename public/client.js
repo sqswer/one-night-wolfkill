@@ -128,8 +128,10 @@ function connectSSE() {
     // 新一局开始：清空播报历史与语音队列/去重，必须在开场播报之前完成
     _ttsSeq++;                   // 作废在途的 onend/finish
     clearAnnHistory();
+    const annEl = $('#ann-text'); if (annEl) annEl.textContent = '';
     stopAnnounce();
     _ttsLastEnqueued = '';
+    _ttsAutoUnlocking = false;
   });
   es.addEventListener('speak', (e) => {
     const text = JSON.parse(e.data).text;
@@ -190,6 +192,9 @@ function renderLobby(s) {
       <span class="tag ${tagCls}">${tagText}</span>`;
     ul.appendChild(li);
   });
+  // 返回大厅时清空上局播报，避免旧记录残留
+  clearAnnHistory();
+  const annEl = $('#ann-text'); if (annEl) annEl.textContent = '等待开始…';
   const hostOnly = $('#host-only');
   hostOnly.classList.toggle('hidden', !s.isHost);
   $('#btn-start').classList.toggle('hidden', !s.isHost);
@@ -845,6 +850,7 @@ let _ttsZhVoice = null;        // 缓存的中文语音
 let _ttsQueue = [];            // 待播报队列（上帝视角：所有角色播报依次完整朗读）
 let _ttsDraining = false;      // 是否正在逐条播报
 let _ttsUnlocked = false;      // 是否已通过用户手势真正解锁（部分浏览器仅 resume 不够）
+let _ttsAutoUnlocking = false; // 是否已自动尝试解锁（避免重复触发兜底）
 let _ttsLastEnqueued = '';     // 入队去重：避免同一条播报重复入队
 let _currentAnnText = '';      // 当前正显示/播报的文本
 let _annHistory = [];          // 播报历史（用于展示所有播报内容）
@@ -938,6 +944,12 @@ function speakAnnounce(text) {
   }
   // 语音：未开启或浏览器不支持时不再进一步处理
   if (!ttsOn || !('speechSynthesis' in window)) return;
+  // 若尚未解锁，自动尝试一次解锁兜底：部分浏览器在用户未交互前会静默阻塞 speak，
+  // 触发 unlockTTS 的 1.5s 兜底后队列仍会继续推进，保证文字/语音不会卡丢。
+  if (!_ttsUnlocked && !_ttsAutoUnlocking) {
+    _ttsAutoUnlocking = true;
+    unlockTTS();
+  }
   if (!_ttsDraining) _ttsDrain();
 }
 
@@ -1048,6 +1060,7 @@ function stopAnnounce() {
   _ttsCurrentText = null;
   _ttsCurrentStarted = false;
   _ttsRetryCount = 0;
+  _ttsAutoUnlocking = false;
   clearTimeout(_ttsWatchdog);
   clearTimeout(_ttsStartWatchdog);
   if ('speechSynthesis' in window) try { speechSynthesis.cancel(); } catch (_) {}
