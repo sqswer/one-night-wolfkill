@@ -48,7 +48,7 @@ const ROLE_DESC = {
   village_idiot: '轮转所有其他玩家的身份牌（自己不变）。',
   drunk: '被迫与一张中央底牌随机交换身份。',
   insomniac: '天亮前查看自己最终的身份。',
-  sentinel: '给任意玩家或中央底牌上盾，被盾保护的牌本夜不可被查/换/移动。',
+  sentinel: '给一名玩家上盾，被盾保护的玩家本夜不可被查/换/移动。',
   doppelganger: '查看一名玩家身份并复制其角色能力（原版规则，本作简化为仅查看）。',
   revealer: '揭示一名玩家的身份（信息类）。',
   bodyguard: '投票时保护一人：其获最高票则次高票者（≥2票）被放逐。',
@@ -66,7 +66,7 @@ const ROLE_DESC = {
   gremlin: '盲交换任意两人的角色牌或状态标记（可含自己）。',
   cupid: '黄昏给两名玩家放爱之标记，令二人同生共死。',
   assassin: '黄昏给一名玩家放刺杀标记；该玩家死亡时你获胜。',
-  tracker: '看谁在夜晚动过牌（举拇指），识破换牌角色。',
+  tracker: '查看本夜哪些玩家动过牌（直接查看，不用选人），识破换牌角色。',
 };
 
 // --------------------------- 工具 ---------------------------
@@ -556,10 +556,14 @@ function renderAction(s) {
       box.querySelectorAll('[data-mode]').forEach(x => x.classList.remove('sel')); b.classList.add('sel'); renderSeerChoices(a);
     });
     renderSeerChoices(a);
-  } else if (a.type === 'detective' || a.type === 'troublemaker' || a.type === 'cupid' || a.type === 'tracker') {
-    const max = (a.type === 'cupid' || a.type === 'tracker' || a.type === 'troublemaker') ? 2 : 2;
+  } else if (a.type === 'detective' || a.type === 'troublemaker' || a.type === 'cupid') {
+    const max = 2;
     html += `<div class="choice-grid" id="a-grid"></div><div class="row-btns"><button class="btn btn-primary" id="a-confirm">确认（选 2 人）</button></div>`;
     box.innerHTML = html; renderMultiPlayer(a, max);
+  } else if (a.type === 'tracker') {
+    html += `<div class="a-sub">点击下方按钮，查看本夜哪些玩家动过牌（无需选择目标）。</div>`;
+    html += `<div class="row-btns"><button class="btn btn-primary" id="a-confirm">查看本夜动牌者</button></div>`;
+    box.innerHTML = html;
   } else if (a.type === 'witch') {
     html += `<div class="a-sub">查看中央：</div><div class="choice-grid" id="a-center"></div>`;
     html += `<div class="a-sub">是否与某玩家交换：</div><div class="choice-grid" id="a-grid"></div>`;
@@ -682,7 +686,7 @@ function submitAction(a) {
   }
   else if (a.type === 'detective' || a.type === 'troublemaker') payload = { targets: actionSel.targets || [] };
   else if (a.type === 'cupid') payload = { targets: actionSel.targets || [] };
-  else if (a.type === 'tracker') payload = { a: (actionSel.targets || [])[0], b: (actionSel.targets || [])[1] };
+  else if (a.type === 'tracker') payload = { view: true };
   else if (a.type === 'witch') payload = { center: actionSel.center ?? null, swapWith: actionSel.swapWith ?? null };
   else if (a.type === 'sharpshooter') payload = { roleTarget: actionSel.roleTarget ?? null, markTarget: actionSel.markTarget ?? null };
   else if (a.type === 'gremlin') payload = { a: (actionSel.targets || [])[0], b: (actionSel.targets || [])[1], mode: actionSel.mode || 'marks' };

@@ -637,7 +637,7 @@ function buildActionPrompt(room, action, seat) {
     case 'troublemaker':
       return { ...base, type: 'troublemaker', text: '捣蛋鬼：交换两名玩家的身份牌（自己不变）。', players };
     case 'sentinel':
-      return { ...base, type: 'shield', text: '哨兵：选择一张牌上盾封锁（本夜不可被查/换）。', players, centers };
+      return { ...base, type: 'shield', text: '哨兵：选择一名玩家上盾封锁（本夜不可被查/换）。', players };
     case 'alphaWolf':
       return { ...base, type: 'alphaWolf', text: '阿尔法狼：将一张中央底牌与一名非狼、非自己的玩家交换（把中央牌塞入玩家堆）。', players, centers };
     case 'doppelganger':
@@ -659,7 +659,7 @@ function buildActionPrompt(room, action, seat) {
     case 'gremlin':
       return { ...base, type: 'gremlin', text: '小魔怪：盲交换任意两名玩家的角色牌或状态标记（可含自己，不看牌）。', players };
     case 'tracker':
-      return { ...base, type: 'tracker', text: '循迹者：查看哪些玩家在夜晚动过牌（本作简化为选两人判断是否对调）。', players };
+      return { ...base, type: 'tracker', text: '循迹者：查看本夜哪些玩家动过牌（无需选择，直接查看结果）。', players };
     case 'bodyguard':
       return { ...base, type: 'protect', text: '保镖：选择保护目标（其获最高票时不会被放逐，由次高票≥2票者替死）。', players };
     default:
@@ -684,6 +684,9 @@ function handleNightAction(room, token, payload) {
 }
 
 function applyAction(room, action, subs) {
+  // 收集本夜实际执行过行动/动过牌的角色座位，供循迹者查看“谁在晚上有动作”
+  if (!room.nightActors) room.nightActors = new Set();
+  action.seats.forEach(seat => { if (subs[seat] != null) room.nightActors.add(seat); });
   const r = action.role;
   if (r === 'werewolf') {
     const ci = subs[action.seats[0]].center;
@@ -740,8 +743,7 @@ function applyAction(room, action, subs) {
     }
   } else if (r === 'sentinel') {
     const s = action.seats[0]; const sub = subs[s];
-    if (sub.kind === 'player') room.currentRole[sub.target] && (room.players[sub.target]._shield = true);
-    else if (sub.kind === 'center' && room.centerCards[sub.idx]) room.centerCards[sub.idx].locked = true;
+    if (sub.kind === 'player' && sub.target != null && room.currentRole[sub.target]) room.players[sub.target]._shield = true;
     publicLog(room, `哨兵设置了一面盾牌。`);
   } else if (r === 'alphaWolf') {
     const s = action.seats[0]; const sub = subs[s];
@@ -837,19 +839,20 @@ function applyAction(room, action, subs) {
       }
     }
   } else if (r === 'tracker') {
-    const s = action.seats[0]; const sub = subs[s];
-    const a = sub.a, b = sub.b;
-    if (a != null && b != null && a !== b) {
-      // 判断是否对调：对比初始身份与当前身份是否互换
-      const swapped = (room.currentRole[a] === room.initialRole[b]) && (room.currentRole[b] === room.initialRole[a]);
-      sendPrivate(room, room.players[s].token, `循迹者：${seatName(room, a)} 与 ${seatName(room, b)} 的身份牌${swapped ? '本夜被对调了' : '未被对调'}。`);
-    }
+    const s = action.seats[0];
+    // 查看本夜实际执行过行动/动过牌的玩家（排除循迹者自己）
+    const actors = [...(room.nightActors || new Set())].filter(x => x !== s);
+    const names = actors.map(seat => seatName(room, seat));
+    sendPrivate(room, room.players[s].token, names.length
+      ? `循迹者：本夜在晚上有动作的玩家是 ${names.join('、')}。`
+      : `循迹者：本夜似乎没有玩家动过牌。`);
   }
 }
 
 function beginDay(room) {
   room.phase = 'day';
   room.currentAction = null;
+  room.nightActors = new Set();
   if (room.nightTimer) { clearTimeout(room.nightTimer); room.nightTimer = null; }
   announce(room, '天亮了，请睁眼。现在是白天发言阶段，请大家依次发言。');
   publicLog(room, '天亮了，进入白天发言阶段。');
