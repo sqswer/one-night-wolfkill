@@ -6,6 +6,9 @@ node_modules/
 # 服务端 TTS 缓存（按内容哈希生成的 mp3，自动生成无需提交）
 tts-cache/
 
+# Piper 自托管 TTS 的二进制与模型（由 scripts/install_piper.js 下载，体积大、不入库）
+tts-bin/
+
 # 临时目录（图片生成等工作目录）
 _tmp/
 **/_tmp/

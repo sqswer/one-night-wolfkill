@@ -1315,7 +1315,7 @@ const server = http.createServer((req, res) => {
     const voice = (parsed.query.voice || '').toString() || undefined;
     _tts.synthesize(text, voice).then(buf => {
       res.writeHead(200, {
-        'Content-Type': 'audio/mpeg',
+        'Content-Type': _tts.contentType(),
         'Content-Length': buf.length,
         'Cache-Control': 'public, max-age=86400',
         'X-Accel-Buffering': 'no'

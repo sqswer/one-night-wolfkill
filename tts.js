@@ -1,22 +1,56 @@
 'use strict';
 // 服务端 TTS 模块（零依赖外壳）。
-// 支持两种语音源（通过环境变量选择，缺省自动判定）：
-//   1) baidu  —— 百度语音合成（国内稳定可访问、有免费额度，需要 BAIDU_TTS_API_KEY + BAIDU_TTS_SECRET_KEY）
-//   2) edge   —— 微软 Edge 在线语音（免费、无需 key，但需要能联网微软；部分网络/浏览器被墙时不可用）
-// 生成的 mp3 按内容哈希落盘缓存（tts-cache/），重复播报秒回，降低对外部接口的依赖。
+// 支持四种语音源（通过环境变量 TTS_PROVIDER 选择，缺省自动判定）：
+//   1) piper —— 本地自托管 Piper TTS（MIT 协议，完全免费、无需 key、运行时零联网；需先准备好二进制+模型，
+//               见 scripts/install_piper.js）。推荐的内部部署方案，中文音质好、资源占用极低。
+//   2) baidu —— 百度语音合成（国内可访问，需要 BAIDU_TTS_API_KEY + BAIDU_TTS_SECRET_KEY）
+//   3) edge  —— 微软 Edge 在线语音（免费、无需 key，但需要能联网微软；部分网络/浏览器被墙时不可用）
+// 生成的音频按内容哈希落盘缓存（tts-cache/），重复播报秒回。
 // 未配置可用的语音源时，available() 返回 false，调用方降级为纯文字，绝不抛错中断游戏。
 
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const child_process = require('child_process');
 
 const CACHE_DIR = path.join(__dirname, 'tts-cache');
 const OUTPUT_FORMAT = process.env.TTS_FORMAT || 'audio-24khz-48kbitrate-mono-mp3';
 
-// provider 自动判定：配了百度 key 就用百度，否则回退 edge
-const PROVIDER = (process.env.TTS_PROVIDER || (process.env.BAIDU_TTS_API_KEY ? 'baidu' : 'edge')).toLowerCase();
-
-const _fetch = globalThis.fetch ? globalThis.fetch.bind(globalThis) : null;
+// ---- Piper（本地自托管）相关 ----
+function _piperBin() {
+  return process.env.PIPER_BIN || path.join(__dirname, 'tts-bin', 'piper' + (process.platform === 'win32' ? '.exe' : ''));
+}
+function _piperModel() {
+  return process.env.PIPER_MODEL || path.join(__dirname, 'tts-bin', 'zh_CN-huayan-medium.onnx');
+}
+function _piperPresent() {
+  try { return fs.existsSync(_piperBin()) && fs.existsSync(_piperModel()); } catch (_) { return false; }
+}
+function _synthesizePiper(text) {
+  return new Promise((resolve, reject) => {
+    const bin = _piperBin();
+    const model = _piperModel();
+    const tmp = path.join(CACHE_DIR, 'piper_' + crypto.randomBytes(8).toString('hex') + '.wav');
+    let done = false;
+    const finish = (err, buf) => {
+      if (done) return; done = true;
+      if (err) return reject(err);
+      resolve(buf);
+    };
+    let cp;
+    try {
+      cp = child_process.execFile(bin, ['--model', model, '--output-file', tmp], { timeout: 30000 }, (err) => {
+        if (err) { try { fs.unlinkSync(tmp); } catch (_) {} return finish(err); }
+        fs.promises.readFile(tmp).then(b => { fs.promises.unlink(tmp).catch(() => {}); finish(null, b); }).catch(finish);
+      });
+    } catch (e) { return finish(e); }
+    if (cp.stdin) {
+      cp.stdin.on('error', () => {});
+      try { cp.stdin.write(text); cp.stdin.end(); } catch (_) {}
+    }
+    setTimeout(() => { try { cp.kill(); } catch (_) {} finish(new Error('Piper 合成超时')); }, 32000);
+  });
+}
 
 // ---- 百度语音相关 ----
 let _baiduToken = null;
@@ -117,11 +151,26 @@ async function _synthesizeEdge(text, voice) {
   return audio;
 }
 
+// ---- provider 自动判定 ----
+const _fetch = globalThis.fetch ? globalThis.fetch.bind(globalThis) : null;
+const PROVIDER = (() => {
+  const p = (process.env.TTS_PROVIDER || '').toLowerCase();
+  if (p) return p;
+  if (_piperPresent()) return 'piper';
+  if (process.env.BAIDU_TTS_API_KEY) return 'baidu';
+  return 'edge';
+})();
+
 // ---- 公共接口 ----
 function available() {
+  if (PROVIDER === 'piper') return _piperPresent();
   if (PROVIDER === 'baidu') return _baiduEnabled();
   if (PROVIDER === 'edge') return !!_loadEdge();
   return false;
+}
+
+function contentType() {
+  return PROVIDER === 'piper' ? 'audio/wav' : 'audio/mpeg';
 }
 
 function _cacheKey(text, tag) {
@@ -130,17 +179,22 @@ function _cacheKey(text, tag) {
 
 async function synthesize(text, voice) {
   const provider = PROVIDER;
-  const tag = provider === 'baidu' ? ('baidu:' + (process.env.BAIDU_TTS_PER || '4')) : ('edge:' + (voice || EDGE_VOICE));
+  let tag, ext;
+  if (provider === 'piper') { tag = 'piper'; ext = 'wav'; }
+  else if (provider === 'baidu') { tag = 'baidu:' + (process.env.BAIDU_TTS_PER || '4'); ext = 'mp3'; }
+  else { tag = 'edge:' + (voice || EDGE_VOICE); ext = 'mp3'; }
   const key = _cacheKey(text, tag);
-  const cp = path.join(CACHE_DIR, key + '.mp3');
+  const cp = path.join(CACHE_DIR, key + '.' + ext);
   try {
     const cached = await fs.promises.readFile(cp);
     if (cached && cached.length) return cached;
   } catch (_) { /* 缓存未命中 */ }
 
-  const audio = provider === 'baidu'
-    ? await _synthesizeBaidu(text)
-    : await _synthesizeEdge(text, voice);
+  const audio = provider === 'piper'
+    ? await _synthesizePiper(text)
+    : provider === 'baidu'
+      ? await _synthesizeBaidu(text)
+      : await _synthesizeEdge(text, voice);
 
   try {
     await fs.promises.mkdir(CACHE_DIR, { recursive: true });
@@ -149,4 +203,4 @@ async function synthesize(text, voice) {
   return audio;
 }
 
-module.exports = { synthesize, available, PROVIDER, OUTPUT_FORMAT };
+module.exports = { synthesize, available, contentType, PROVIDER, OUTPUT_FORMAT };
