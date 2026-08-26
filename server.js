@@ -31,7 +31,7 @@ const ROLES = {
   village_idiot:       { name: '村庄白痴', team: 'village', nightOrder: 92, wake: true,  action: 'idiot',      hint: '村庄白痴请睁眼，轮转所有其他玩家的身份牌。' },
   drunk:               { name: '酒鬼',     team: 'village', nightOrder: 95, wake: true,  action: 'drunk',      hint: '酒鬼请睁眼，与一张中央底牌交换身份。' },
   insomniac:           { name: '失眠者',   team: 'village', nightOrder: 97, wake: true,  action: 'insomniac',  hint: '失眠者请睁眼，查看你最终的身份。' },
-  sentinel:            { name: '哨兵',     team: 'village', nightOrder: 10, wake: true,  action: 'sentinel',   hint: '哨兵请睁眼，选择一名玩家或一张中央底牌，放上一面盾牌封锁。' },
+  sentinel:            { name: '哨兵',     team: 'village', nightOrder: 10, wake: true,  action: 'sentinel',   hint: '哨兵请睁眼，选择一名玩家上盾封锁（本夜不可被查/换）。' },
   doppelganger:        { name: '化身幽灵', team: 'village', nightOrder: 20, wake: true,  action: 'doppelganger', hint: '化身幽灵请睁眼，查看一名玩家的身份。' },
   revealer:            { name: '揭秘者',   team: 'village', nightOrder: 98, wake: true,  action: 'revealer',   hint: '揭秘者请睁眼，揭示一名玩家的身份。' },
   bodyguard:           { name: '保镖',     team: 'village', wake: false, dayAction: 'protect' },
@@ -203,15 +203,23 @@ function announce(room, text, step, kind, stage, meta) {
 // 夜间节奏由「客户端语音播报确认」驱动：服务端在播完某角色「闭眼」后不再用固定计时器硬推进，
 // 而是等待客户端确认该条已念完（nightAck）再进入下一位 / 进入白天，从而与语音/文字严格同步。
 // 兜底：超过 NIGHT_ACK_TIMEOUT 仍无确认（如全部客户端静音/出错/断线）则自动推进，避免夜晚卡死。
-const NIGHT_ACK_TIMEOUT = Number(process.env.NIGHT_ACK_TIMEOUT) || 20000;
+const NIGHT_ACK_TIMEOUT = Number(process.env.NIGHT_ACK_TIMEOUT) || 8000;
 function clearNightHold(room) {
   if (room.nightHoldTimer) { clearTimeout(room.nightHoldTimer); room.nightHoldTimer = null; }
   room.nightHold = null;
 }
+// 安全地推进：任何异常都被捕获并记录，绝不因此让 Node 进程崩溃（进程崩溃会表现为夜晚永久卡死）
+function safeAdvance(room, label) {
+  try { advanceQueue(room); }
+  catch (e) { console.error('[night] advanceQueue 异常(' + label + '):', e && e.stack || e); }
+}
 function holdNightAck(room, cb) {
   clearNightHold(room);
   room.nightHold = cb;
-  room.nightHoldTimer = setTimeout(() => { room.nightHold = null; cb(); }, NIGHT_ACK_TIMEOUT);
+  room.nightHoldTimer = setTimeout(() => {
+    room.nightHold = null;
+    try { cb(); } catch (e) { console.error('[night] 超时推进异常:', e && e.stack || e); safeAdvance(room, 'timeout'); }
+  }, NIGHT_ACK_TIMEOUT);
 }
 
 // 给单人推送私有信息（不公开）
@@ -356,9 +364,7 @@ function botAutoSubmit(room, action, seat) {
     case 'robber': return { target: randOther(room, seat) };
     case 'witch': return { center: hasCenter(room) ? randCenter(room) : null, swapWith: null };
     case 'troublemaker': { const [a, b] = twoDistinct(room, seat); return { a, b }; }
-    case 'sentinel': return (hasCenter(room) && Math.random() < 0.5)
-      ? { kind: 'center', idx: randCenter(room) }
-      : { kind: 'player', target: randOther(room, seat) };
+    case 'sentinel': return { kind: 'player', target: randOther(room, seat) };
     case 'alphaWolf': return { idx: randCenter(room), target: randOther(room, seat) };
     case 'vampire': return { target: randOther(room, seat) };
     case 'count': return { target: randOther(room, seat) };
@@ -1395,7 +1401,7 @@ const server = http.createServer((req, res) => {
           restartGame(room); break;
         case 'nightAck':
           // 客户端确认当前角色的「闭眼」播报已念完：推进夜晚到下一位 / 进入白天（音文同步节奏）
-          if (room.nightHold) { const cb = room.nightHold; clearNightHold(room); cb(); }
+          if (room.nightHold) { const cb = room.nightHold; clearNightHold(room); try { cb(); } catch (e) { console.error('[night] nightAck 推进异常:', e && e.stack || e); safeAdvance(room, 'nightAck'); } }
           return sendJSON(res, { ok: true });
         case 'ping': break;
       case 'voice': {

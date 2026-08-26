@@ -133,6 +133,7 @@ function connectSSE() {
     _ttsLastEnqueued = '';
     _ttsAutoUnlocking = false;
     _openStep = 0; _closedStep = 0; _openStage = null; _openRoleName = ''; _ttsCurrentItem = null; // 新局重置夜间揭示进度
+    if (_nightAckFallback) { clearTimeout(_nightAckFallback); _nightAckFallback = null; }
   });
   es.addEventListener('speak', (e) => {
     const d = JSON.parse(e.data);
@@ -866,6 +867,7 @@ let _annHistory = [];          // 播报历史（用于展示所有播报内容�
 let _audioCtx = null;          // 用于 Via/移动端 WebView 解锁音频自动播放
 let _ttsSupported = ('speechSynthesis' in window);
 let _ttsCurrentText = null;    // 当前正在朗读的文本（供静默失败重试判断）
+let _nightAckFallback = null;  // 「闭眼」播报兜底确认定时器：即使 TTS 的 onend 不触发，也能在数秒内通知服务端推进
 let _openStep = 0, _closedStep = 0, _openStage = null; // 夜间 UI 揭示进度：跟随「睁眼/闭眼」播报实际展示的步数，使界面与语音同步
 let _openRoleName = '';        // 当前揭示到的角色名（来自播报 meta，步骤条显示用）
 let _ttsCurrentItem = null;    // 当前正在朗读的播报条目（含 kind），用于「闭眼」播完时回执服务端
@@ -1029,6 +1031,12 @@ function _ttsDrain() {
   _ttsCurrentItem = item;
   // 文字与语音同步：轮到本条朗读时才把播报区切换到本条文字
   showAnnItem(item.text, item.step, item.kind, item.stage, item.roleName);
+  // 「闭眼」播报：无论 TTS 是否正常结束，都设一个兜底定时器确保通知服务端推进，
+  // 避免个别浏览器/WebView 的 speechSynthesis.onend 不触发导致夜晚永久卡在「闭眼」。
+  if (item.kind === 'close') {
+    if (_nightAckFallback) clearTimeout(_nightAckFallback);
+    _nightAckFallback = setTimeout(() => { sendNightAck(); }, 4500);
+  }
   _speakOne(item.text);
 }
 
@@ -1083,7 +1091,7 @@ function _afterUtterance() {
   _ttsCurrentItem = null;
   _ttsDraining = false;
   // 当前播完的是某角色的「闭眼」播报 → 通知服务端推进下一位 / 进入白天（音文同步的关键）
-  if (finished && finished.kind === 'close') sendNightAck();
+  if (finished && finished.kind === 'close') { if (_nightAckFallback) { clearTimeout(_nightAckFallback); _nightAckFallback = null; } sendNightAck(); }
   setTimeout(_ttsDrain, 120);
 }
 
@@ -1099,6 +1107,7 @@ function stopAnnounce() {
   _ttsAutoUnlocking = false;
   clearTimeout(_ttsWatchdog);
   clearTimeout(_ttsStartWatchdog);
+  if (_nightAckFallback) { clearTimeout(_nightAckFallback); _nightAckFallback = null; }
   if ('speechSynthesis' in window) try { speechSynthesis.cancel(); } catch (_) {}
 }
 
