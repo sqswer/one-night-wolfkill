@@ -1099,11 +1099,11 @@ function _ttsDoSpeak(text, attempt) {
 function _speakOne(text) {
   _ttsRetryCount = 0; _ttsCurrentText = text;
   // 本地语音引擎可用（有中文语音）→ 走浏览器内置 Web Speech；
-  // 否则（Via / 小米自带浏览器等无引擎）→ 优先浏览器直连微软 Edge TTS（不经部署服务器、不依赖本地引擎），
-  // 直连失败再回退服务端 /api/tts，再失败才纯文字（绝不卡住队列）。
+  // 否则（Via / 小米自带浏览器等无引擎）→ 优先服务端 TTS（现可接百度，国内稳定），
+  // 服务端失败再回退浏览器直连微软 Edge TTS，再失败才纯文字（绝不卡住队列）。
   const localOk = _ttsSupported && _ttsVoices.length > 0;
   if (localOk) _ttsDoSpeak(text, 0);
-  else _speakEdgeWS(text, () => _speakServer(text));
+  else _speakServer(text, () => _speakEdgeWS(text, () => {}));
 }
 
 /** 浏览器直连微软 Edge TTS：本地无语音引擎时，由手机浏览器直接连微软语音服务拉取 mp3 播放。
@@ -1181,19 +1181,26 @@ function _speakEdgeWS(text, fallback) {
 
 /** 服务端 TTS 兜底：本地无语音引擎时，从 /api/tts 拉取合成的 mp3 用 <audio> 播放。
  *  音频 ended（或 play 被拒/出错）→ 走与本地 onend 相同的 _afterUtterance 流程（含「闭眼」回执 nightAck）；
- *  若服务端 TTS 不可用，则标记失败、仅文字显示，绝不卡住队列。 */
-function _speakServer(text) {
-  if (_serverTtsState === false) { _afterUtterance(); return; }
+ *  若服务端 TTS 不可用，则标记失败，调用 fallback（如浏览器直连微软）继续尝试；无 fallback 时仅文字显示，绝不卡住队列。 */
+function _speakServer(text, fallback) {
+  if (_serverTtsState === false) { if (fallback) fallback(); else _afterUtterance(); return; }
   if (!_audioEl) { _audioEl = new Audio(); _audioEl.preload = 'auto'; }
   const u = '/api/tts?text=' + encodeURIComponent(text) + '&voice=' + encodeURIComponent(TTS_VOICE);
   const onEnd = () => { _cleanupAudio(); _serverTtsState = true; _afterUtterance(); };
-  const onErr = () => { _cleanupAudio(); if (_serverTtsState !== false) { _serverTtsState = false; if (!_serverTtsWarned) { _serverTtsWarned = true; toast('服务端语音不可用，已改为文字显示。建议用 Chrome / Edge 获得语音。'); } } _afterUtterance(); };
+  const onFail = () => {
+    _cleanupAudio();
+    if (_serverTtsState === false) return;   // 已处理过
+    _serverTtsState = false;
+    if (fallback) fallback();                // 服务端失败 → 再试浏览器直连微软
+    else { if (!_serverTtsWarned) { _serverTtsWarned = true; toast('语音不可用，已改为文字显示。建议用 Chrome / Edge 获得语音。'); } _afterUtterance(); }
+  };
   function _cleanupAudio() { if (_audioEl) { _audioEl.removeEventListener('ended', onEnd); _audioEl.removeEventListener('error', onErr); } }
+  const onErr = onFail;
   _audioEl.addEventListener('ended', onEnd);
   _audioEl.addEventListener('error', onErr);
   _audioEl.src = u;
   const p = _audioEl.play();
-  if (p && p.catch) p.catch(() => { _cleanupAudio(); if (_serverTtsState !== false) _serverTtsState = false; _afterUtterance(); });
+  if (p && p.catch) p.catch(() => { _cleanupAudio(); onFail(); });
 }
 
 /** 一条朗读结束（onend/onerror/看门狗）后推进到下一条 */

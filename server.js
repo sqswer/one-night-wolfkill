@@ -3,6 +3,16 @@
 // 技术：内置 http + Server-Sent Events(SSE) + fetch(POST)。无需 npm install。
 // 语音：客户端使用浏览器内置 Web Speech API（播报员 TTS / 玩家语音识别），无需密钥。
 
+// 极简 .env 加载（零依赖）：若存在 .env 则注入环境变量（不覆盖已存在的），用于配置 TTS key 等敏感信息
+try {
+  const _fs = require('fs'), _path = require('path');
+  const _raw = _fs.readFileSync(_path.join(__dirname, '.env'), 'utf8');
+  for (const _line of _raw.split('\n')) {
+    const _m = _line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(.*)\s*$/);
+    if (_m && !(process.env[_m[1]])) process.env[_m[1]] = _m[2].replace(/^["']|["']$/g, '');
+  }
+} catch (_) {}
+
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
