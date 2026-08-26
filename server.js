@@ -192,11 +192,26 @@ function publicLog(room, text) {
   if (room.log.length > 200) room.log.shift();
   broadcast(room, 'log', { text });
 }
-function announce(room, text, step, kind, stage) {
+function announce(room, text, step, kind, stage, meta) {
   room.announce = text;
   const payload = { text, step: step || 0, kind: kind || null, stage: stage || null };
+  if (meta) Object.assign(payload, meta);
   broadcast(room, 'speak', payload);
   broadcast(room, 'announce', payload);
+}
+
+// 夜间节奏由「客户端语音播报确认」驱动：服务端在播完某角色「闭眼」后不再用固定计时器硬推进，
+// 而是等待客户端确认该条已念完（nightAck）再进入下一位 / 进入白天，从而与语音/文字严格同步。
+// 兜底：超过 NIGHT_ACK_TIMEOUT 仍无确认（如全部客户端静音/出错/断线）则自动推进，避免夜晚卡死。
+const NIGHT_ACK_TIMEOUT = Number(process.env.NIGHT_ACK_TIMEOUT) || 20000;
+function clearNightHold(room) {
+  if (room.nightHoldTimer) { clearTimeout(room.nightHoldTimer); room.nightHoldTimer = null; }
+  room.nightHold = null;
+}
+function holdNightAck(room, cb) {
+  clearNightHold(room);
+  room.nightHold = cb;
+  room.nightHoldTimer = setTimeout(() => { room.nightHold = null; cb(); }, NIGHT_ACK_TIMEOUT);
 }
 
 // 给单人推送私有信息（不公开）
@@ -502,6 +517,7 @@ function setupStage(room, stage) {
 }
 
 function advanceQueue(room) {
+  clearNightHold(room);
   if (room.nightTimer) { clearTimeout(room.nightTimer); room.nightTimer = null; }
   room.qIndex++;
   if (room.qIndex >= room.queue.length) {
@@ -516,7 +532,7 @@ function advanceQueue(room) {
   }
   const item = room.queue[room.qIndex];
   const r = ROLES[item.role];
-  announce(room, r.hint || `请【${r.name}】睁眼。`, room.qIndex + 1, 'open', item.stage);
+  announce(room, r.hint || `请【${r.name}】睁眼。`, room.qIndex + 1, 'open', item.stage, { roleName: r.name });
   // 没有玩家持有该角色时（只在中央），仅播报睁眼/闭眼流程，不请求输入也不执行效果
   const needsInput = item.seats.length > 0 && roleNeedsInput(item.role, room, item.seats);
   room.currentAction = { role: item.role, stage: item.stage, seats: item.seats, submissions: {}, needsInput };
@@ -540,13 +556,13 @@ function advanceQueue(room) {
   }
 }
 
-// 信息类角色闭眼后推进
+// 信息类角色闭眼后推进：等待客户端确认「闭眼」播报已念完再进入下一位
 function closeAndAdvance(room, r) {
-  announce(room, `请【${r.name}】闭眼。`, room.qIndex + 1, 'close', room.queue[0].stage);
+  announce(room, `请【${r.name}】闭眼。`, room.qIndex + 1, 'close', room.queue[0].stage, { roleName: r.name });
   room.currentAction = null;
   pushState(room);
-  // 闭眼后统一停留 2 秒，再给下一位角色睁眼
-  room.nightTimer = setTimeout(() => advanceQueue(room), 2000);
+  // 由客户端语音确认驱动：播完「闭眼」后服务端等待 nightAck 再推进，与语音严格同步
+  holdNightAck(room, () => advanceQueue(room));
 }
 
 // 需要输入的角色（含机器人自动提交）执行完毕后闭眼并推进
@@ -554,9 +570,9 @@ function finishAutoAction(room, r) {
   applyAction(room, room.currentAction, room.currentAction.submissions);
   room.currentAction = null;
   pushState(room);
-  // 操作完成后立即闭眼（不再额外停留）；闭眼后再统一停留 2 秒，给玩家反应时间，再进入下一位角色
-  announce(room, `请【${r.name}】闭眼。`, room.qIndex + 1, 'close', room.queue[0].stage);
-  room.nightTimer = setTimeout(() => advanceQueue(room), 2000);
+  // 操作完成后立即闭眼（不再额外停留）；等待客户端确认「闭眼」播报已念完再进入下一位
+  announce(room, `请【${r.name}】闭眼。`, room.qIndex + 1, 'close', room.queue[0].stage, { roleName: r.name });
+  holdNightAck(room, () => advanceQueue(room));
 }
 
 function roleNeedsInput(role, room, seats) {
@@ -861,6 +877,7 @@ function beginDay(room) {
   room.currentAction = null;
   room.nightActors = new Set();
   if (room.nightTimer) { clearTimeout(room.nightTimer); room.nightTimer = null; }
+  clearNightHold(room);
   announce(room, '天亮了，请睁眼。现在是白天发言阶段，请大家依次发言。');
   publicLog(room, '天亮了，进入白天发言阶段。');
   // 注意：白天角色卡恒定显示初始身份（见 buildState）。最终身份仅失眠者可在天亮前查看，
@@ -1139,6 +1156,7 @@ function restartGame(room) {
   room.privateInfo = {};
   room.queue = []; room.qIndex = -1;
   if (room.nightTimer) { clearTimeout(room.nightTimer); room.nightTimer = null; }
+  clearNightHold(room);
   pushState(room);
 }
 
@@ -1375,6 +1393,10 @@ const server = http.createServer((req, res) => {
         case 'restart':
           if (p.token !== room.hostToken) return sendJSON(res, { error: '仅房主可重开' });
           restartGame(room); break;
+        case 'nightAck':
+          // 客户端确认当前角色的「闭眼」播报已念完：推进夜晚到下一位 / 进入白天（音文同步节奏）
+          if (room.nightHold) { const cb = room.nightHold; clearNightHold(room); cb(); }
+          return sendJSON(res, { ok: true });
         case 'ping': break;
       case 'voice': {
         const sub = payload && payload.subtype;

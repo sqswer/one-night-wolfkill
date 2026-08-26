@@ -132,11 +132,11 @@ function connectSSE() {
     stopAnnounce();
     _ttsLastEnqueued = '';
     _ttsAutoUnlocking = false;
-    _openStep = 0; _closedStep = 0; _openStage = null; // 新局重置夜间揭示进度
+    _openStep = 0; _closedStep = 0; _openStage = null; _openRoleName = ''; _ttsCurrentItem = null; // 新局重置夜间揭示进度
   });
   es.addEventListener('speak', (e) => {
     const d = JSON.parse(e.data);
-    speakAnnounce(d.text, d.step, d.kind, d.stage); // speak 事件代表一条新播报，入队依次完整朗读（上帝视角）
+    speakAnnounce(d.text, d.step, d.kind, d.stage, d.roleName); // speak 事件代表一条新播报，入队依次完整朗读（上帝视角）
   });
   es.addEventListener('private', (e) => {
     const d = JSON.parse(e.data);
@@ -483,10 +483,13 @@ function renderGame(s) {
     const info = s.nightInfo;
     const ico = info.stage === 'dusk' ? '🌆' : '🌙';
     const stageName = info.stage === 'dusk' ? '黄昏' : '夜晚';
-    // 角色名仅在「该角色睁眼」播报已展示时才显示，避免界面抢跑在语音之前
-    const stepRevealed = (_openStage === info.stage && _openStep >= info.current);
-    $('#stepper-label').innerHTML = `<span class="ico">${ico}</span> ${stageName} · 第 ${info.current} / ${info.total} 步${stepRevealed && info.roleName ? ' · <b style="color:var(--text)">' + info.roleName + '</b>' : ''}`;
-    $('#stepper-fill').style.width = (info.total ? (info.current / info.total * 100) : 0) + '%';
+    // 步骤号与角色名完全跟随「语音实际揭示进度」(_openStep/_openRoleName)，不再使用服务端快时钟的 current，
+    // 彻底消除「步骤数跑在语音前面 / 守夜人刚结束就显示第 7/7 步」的问题。
+    const cur = (_openStage === info.stage) ? Math.max(1, _openStep) : 1;
+    const revealed = cur >= 1 && cur <= info.total;
+    const roleName = (_openStage === info.stage && _closedStep < cur && _openRoleName) ? _openRoleName : '';
+    $('#stepper-label').innerHTML = `<span class="ico">${ico}</span> ${stageName} · 第 ${revealed ? cur : 1} / ${info.total} 步${roleName ? ' · <b style="color:var(--text)">' + escapeHtml(roleName) + '</b>' : ''}`;
+    $('#stepper-fill').style.width = (info.total ? (revealed ? cur : 0) / info.total * 100 : 0) + '%';
   } else st.classList.add('hidden');
 
   // 身份卡
@@ -535,7 +538,8 @@ function renderGame(s) {
   log.scrollTop = log.scrollHeight;
 
   // 各阶段面板
-  // 夜间行动窗口：仅在该角色「睁眼」播报已展示、且尚未「闭眼」时显示，与语音/文字同步
+  // 夜间行动窗口：仅在该角色「睁眼」播报已展示（_openStep 已到达该角色步数）、且尚未「闭眼」时显示，
+  // 完全跟随语音揭示进度，不再跟服务端快时钟的 nightInfo.current 比较，避免操作窗口抢跑。
   const showAction = s.action && (!s.nightInfo || (_openStage === s.nightInfo.stage && _openStep === s.nightInfo.current && _closedStep < _openStep));
   renderAction(s, showAction);
   $('#day-box').classList.toggle('hidden', s.phase !== 'day');
@@ -863,6 +867,8 @@ let _audioCtx = null;          // 用于 Via/移动端 WebView 解锁音频自�
 let _ttsSupported = ('speechSynthesis' in window);
 let _ttsCurrentText = null;    // 当前正在朗读的文本（供静默失败重试判断）
 let _openStep = 0, _closedStep = 0, _openStage = null; // 夜间 UI 揭示进度：跟随「睁眼/闭眼」播报实际展示的步数，使界面与语音同步
+let _openRoleName = '';        // 当前揭示到的角色名（来自播报 meta，步骤条显示用）
+let _ttsCurrentItem = null;    // 当前正在朗读的播报条目（含 kind），用于「闭眼」播完时回执服务端
 let _ttsCurrentStarted = false;// 当前 utterance 是否已真正开始（onstart）
 let _ttsRetryCount = 0;        // 当前语句静默失败重试次数
 let _ttsWatchdog = null;        // 单条朗读的超时看门狗（防 onend 不触发导致队列卡死）
@@ -936,17 +942,19 @@ let _ttsWarned = false;
  * 文字展示在此处无条件先完成，保证「每条播报都有对应文字」，不依赖语音是否可用/已解锁。
  * @param {string} text
  */
-function speakAnnounce(text, step, kind, stage) {
+function speakAnnounce(text, step, kind, stage, roleName) {
   if (!text) return;
   // 入队去重：与最近入队内容相同则跳过，避免重复播报（同一条播报被 state/speak 重复推送时）
   if (text === _ttsLastEnqueued) return;
   _ttsLastEnqueued = text;
-  // 上帝视角：顺序入队（携带步数/类型/阶段，供音文同步时驱动夜间 UI 揭示），由 _ttsDrain 逐条完整朗读
-  _ttsQueue.push({ text, step: step || 0, kind: kind || null, stage: stage || null });
+  // 上帝视角：顺序入队（携带步数/类型/阶段/角色名，供音文同步时驱动夜间 UI 揭示），由 _ttsDrain 逐条完整朗读
+  _ttsQueue.push({ text, step: step || 0, kind: kind || null, stage: stage || null, roleName: roleName || null });
   // 未开启 TTS 或尚未通过手势解锁时，文字立即展示（兜底/手动关闭语音时仍可阅读）；
   // 此处在同一时刻同步追加播报记录(#ann-history)，与文字保持一致，避免记录提前走完
   if (!ttsOn || !_ttsUnlocked || !('speechSynthesis' in window)) {
-    showAnnItem(text, step, kind, stage);
+    showAnnItem(text, step, kind, stage, roleName);
+    // 语音未实际出声：当前「闭眼」播报视为已展示，直接回执服务端推进夜晚（与开启语音时 onend 回执等价）
+    if (kind === 'close') sendNightAck();
   }
   // 语音：未开启或浏览器不支持时不再进一步处理
   if (!ttsOn || !('speechSynthesis' in window)) return;
@@ -957,6 +965,11 @@ function speakAnnounce(text, step, kind, stage) {
     unlockTTS();
   }
   if (!_ttsDraining) _ttsDrain();
+}
+
+/** 通知服务端：当前角色的「闭眼」播报已播完，可推进到下一位 / 进入白天（音文同步节奏） */
+function sendNightAck() {
+  if (STATE.token) api('/api/action', { token: STATE.token, type: 'nightAck', payload: {} }).catch(() => {});
 }
 
 /** 添加一条播报历史 */
@@ -991,15 +1004,15 @@ function clearAnnHistory() {
  *  两者在同一时刻发生，保证“播报记录”与语音/文字进度一致，不会提前走完。
  *  同时：若该条是某角色的「睁眼/闭眼」播报（kind 有值），则同步推进夜间步骤指示与行动窗口，
  *  使界面（步骤条、可操作窗口）与语音/文字播报保持同一节奏，不再抢跑。 */
-function showAnnItem(text, step, kind, stage) {
+function showAnnItem(text, step, kind, stage, roleName) {
   _currentAnnText = text;
   const annEl = $('#ann-text'); if (annEl) annEl.textContent = text;
   addAnnHistory(text);
   // 夜间 UI 揭示：仅在「睁眼/闭眼」播报真正展示时才推进，跟随语音节奏
   if (kind && stage) {
-    if (kind === 'stage') { _openStep = 0; _closedStep = 0; _openStage = stage; }
+    if (kind === 'stage') { _openStep = 0; _closedStep = 0; _openStage = stage; _openRoleName = ''; }
     else if (stage === _openStage) {
-      if (kind === 'open') _openStep = step;
+      if (kind === 'open') { _openStep = step; if (roleName) _openRoleName = roleName; }
       else if (kind === 'close') _closedStep = step;
     }
     if (STATE.data) renderGame(STATE.data);
@@ -1013,8 +1026,9 @@ function _ttsDrain() {
   _ttsDraining = true;
   if (!_ttsReady) _ttsLoadVoices();
   const item = _ttsQueue.shift();
+  _ttsCurrentItem = item;
   // 文字与语音同步：轮到本条朗读时才把播报区切换到本条文字
-  showAnnItem(item.text, item.step, item.kind, item.stage);
+  showAnnItem(item.text, item.step, item.kind, item.stage, item.roleName);
   _speakOne(item.text);
 }
 
@@ -1065,7 +1079,11 @@ function _speakOne(text) { _ttsRetryCount = 0; _ttsCurrentText = text; _ttsDoSpe
 
 /** 一条朗读结束（onend/onerror/看门狗）后推进到下一条 */
 function _afterUtterance() {
+  const finished = _ttsCurrentItem;   // 刚播完的条目（含 kind），用于判断是否为「闭眼」回执
+  _ttsCurrentItem = null;
   _ttsDraining = false;
+  // 当前播完的是某角色的「闭眼」播报 → 通知服务端推进下一位 / 进入白天（音文同步的关键）
+  if (finished && finished.kind === 'close') sendNightAck();
   setTimeout(_ttsDrain, 120);
 }
 
@@ -1074,6 +1092,7 @@ function stopAnnounce() {
   _ttsSeq++;                     // 作废在途的 onend/finish，避免误推进
   _ttsQueue = [];
   _ttsDraining = false;
+  _ttsCurrentItem = null;
   _ttsCurrentText = null;
   _ttsCurrentStarted = false;
   _ttsRetryCount = 0;
