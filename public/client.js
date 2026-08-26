@@ -132,10 +132,11 @@ function connectSSE() {
     stopAnnounce();
     _ttsLastEnqueued = '';
     _ttsAutoUnlocking = false;
+    _openStep = 0; _closedStep = 0; _openStage = null; // 新局重置夜间揭示进度
   });
   es.addEventListener('speak', (e) => {
-    const text = JSON.parse(e.data).text;
-    speakAnnounce(text);   // speak 事件代表一条新播报，入队依次完整朗读（上帝视角）
+    const d = JSON.parse(e.data);
+    speakAnnounce(d.text, d.step, d.kind, d.stage); // speak 事件代表一条新播报，入队依次完整朗读（上帝视角）
   });
   es.addEventListener('private', (e) => {
     const d = JSON.parse(e.data);
@@ -482,7 +483,9 @@ function renderGame(s) {
     const info = s.nightInfo;
     const ico = info.stage === 'dusk' ? '🌆' : '🌙';
     const stageName = info.stage === 'dusk' ? '黄昏' : '夜晚';
-    $('#stepper-label').innerHTML = `<span class="ico">${ico}</span> ${stageName} · 第 ${info.current} / ${info.total} 步${info.roleName ? ' · <b style="color:var(--text)">' + info.roleName + '</b>' : ''}`;
+    // 角色名仅在「该角色睁眼」播报已展示时才显示，避免界面抢跑在语音之前
+    const stepRevealed = (_openStage === info.stage && _openStep >= info.current);
+    $('#stepper-label').innerHTML = `<span class="ico">${ico}</span> ${stageName} · 第 ${info.current} / ${info.total} 步${stepRevealed && info.roleName ? ' · <b style="color:var(--text)">' + info.roleName + '</b>' : ''}`;
     $('#stepper-fill').style.width = (info.total ? (info.current / info.total * 100) : 0) + '%';
   } else st.classList.add('hidden');
 
@@ -532,7 +535,9 @@ function renderGame(s) {
   log.scrollTop = log.scrollHeight;
 
   // 各阶段面板
-  renderAction(s);
+  // 夜间行动窗口：仅在该角色「睁眼」播报已展示、且尚未「闭眼」时显示，与语音/文字同步
+  const showAction = s.action && (!s.nightInfo || (_openStage === s.nightInfo.stage && _openStep === s.nightInfo.current && _closedStep < _openStep));
+  renderAction(s, showAction);
   $('#day-box').classList.toggle('hidden', s.phase !== 'day');
   renderVote(s);
   renderHunter(s);
@@ -544,9 +549,9 @@ function renderGame(s) {
 }
 
 // --------------------------- 行动提示 ---------------------------
-function renderAction(s) {
+function renderAction(s, visible) {
   const box = $('#action-box');
-  if (!s.action) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+  if (!visible || !s.action) { box.classList.add('hidden'); box.innerHTML = ''; return; }
   box.classList.remove('hidden');
   const a = s.action;
   actionSel = {};
@@ -857,6 +862,7 @@ let _annHistory = [];          // 播报历史（用于展示所有播报内容�
 let _audioCtx = null;          // 用于 Via/移动端 WebView 解锁音频自动播放
 let _ttsSupported = ('speechSynthesis' in window);
 let _ttsCurrentText = null;    // 当前正在朗读的文本（供静默失败重试判断）
+let _openStep = 0, _closedStep = 0, _openStage = null; // 夜间 UI 揭示进度：跟随「睁眼/闭眼」播报实际展示的步数，使界面与语音同步
 let _ttsCurrentStarted = false;// 当前 utterance 是否已真正开始（onstart）
 let _ttsRetryCount = 0;        // 当前语句静默失败重试次数
 let _ttsWatchdog = null;        // 单条朗读的超时看门狗（防 onend 不触发导致队列卡死）
@@ -930,17 +936,17 @@ let _ttsWarned = false;
  * 文字展示在此处无条件先完成，保证「每条播报都有对应文字」，不依赖语音是否可用/已解锁。
  * @param {string} text
  */
-function speakAnnounce(text) {
+function speakAnnounce(text, step, kind, stage) {
   if (!text) return;
   // 入队去重：与最近入队内容相同则跳过，避免重复播报（同一条播报被 state/speak 重复推送时）
   if (text === _ttsLastEnqueued) return;
   _ttsLastEnqueued = text;
-  // 上帝视角：顺序入队，由 _ttsDrain 逐条完整朗读（含开场、各角色睁眼/闭眼提示）
-  _ttsQueue.push(text);
+  // 上帝视角：顺序入队（携带步数/类型/阶段，供音文同步时驱动夜间 UI 揭示），由 _ttsDrain 逐条完整朗读
+  _ttsQueue.push({ text, step: step || 0, kind: kind || null, stage: stage || null });
   // 未开启 TTS 或尚未通过手势解锁时，文字立即展示（兜底/手动关闭语音时仍可阅读）；
   // 此处在同一时刻同步追加播报记录(#ann-history)，与文字保持一致，避免记录提前走完
   if (!ttsOn || !_ttsUnlocked || !('speechSynthesis' in window)) {
-    showAnnItem(text);
+    showAnnItem(text, step, kind, stage);
   }
   // 语音：未开启或浏览器不支持时不再进一步处理
   if (!ttsOn || !('speechSynthesis' in window)) return;
@@ -982,11 +988,22 @@ function clearAnnHistory() {
  *  这样开场播报（游戏开始/天黑/狼人/爪牙…）会按到达顺序完整保留，解锁后依次读出。 */
 
 /** 同步展示一条播报：更新播报员文字 + 追加到播报记录(#ann-history)。
- *  两者在同一时刻发生，保证“播报记录”与语音/文字进度一致，不会提前走完。 */
-function showAnnItem(text) {
+ *  两者在同一时刻发生，保证“播报记录”与语音/文字进度一致，不会提前走完。
+ *  同时：若该条是某角色的「睁眼/闭眼」播报（kind 有值），则同步推进夜间步骤指示与行动窗口，
+ *  使界面（步骤条、可操作窗口）与语音/文字播报保持同一节奏，不再抢跑。 */
+function showAnnItem(text, step, kind, stage) {
   _currentAnnText = text;
   const annEl = $('#ann-text'); if (annEl) annEl.textContent = text;
   addAnnHistory(text);
+  // 夜间 UI 揭示：仅在「睁眼/闭眼」播报真正展示时才推进，跟随语音节奏
+  if (kind && stage) {
+    if (kind === 'stage') { _openStep = 0; _closedStep = 0; _openStage = stage; }
+    else if (stage === _openStage) {
+      if (kind === 'open') _openStep = step;
+      else if (kind === 'close') _closedStep = step;
+    }
+    if (STATE.data) renderGame(STATE.data);
+  }
 }
 
 function _ttsDrain() {
@@ -995,10 +1012,10 @@ function _ttsDrain() {
   if (!_ttsUnlocked) return;           // 未解锁：保留队列，等手势解锁后继续（不丢、不乱序）
   _ttsDraining = true;
   if (!_ttsReady) _ttsLoadVoices();
-  const text = _ttsQueue.shift();
+  const item = _ttsQueue.shift();
   // 文字与语音同步：轮到本条朗读时才把播报区切换到本条文字
-  showAnnItem(text);
-  _speakOne(text);
+  showAnnItem(item.text, item.step, item.kind, item.stage);
+  _speakOne(item.text);
 }
 
 /** 朗读单条；文字与播报区已由 _ttsDrain 同步切换，此处只负责「出声」。

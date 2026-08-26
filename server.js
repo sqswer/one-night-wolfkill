@@ -192,10 +192,11 @@ function publicLog(room, text) {
   if (room.log.length > 200) room.log.shift();
   broadcast(room, 'log', { text });
 }
-function announce(room, text) {
+function announce(room, text, step, kind, stage) {
   room.announce = text;
-  broadcast(room, 'speak', { text });
-  broadcast(room, 'announce', { text });
+  const payload = { text, step: step || 0, kind: kind || null, stage: stage || null };
+  broadcast(room, 'speak', payload);
+  broadcast(room, 'announce', payload);
 }
 
 // 给单人推送私有信息（不公开）
@@ -495,8 +496,8 @@ function setupStage(room, stage) {
     .map(rk => ({ role: rk, seats: present[rk] || [], stage }));
   room.queue = queue;
   room.qIndex = -1;
-  if (stage === 'dusk') announce(room, '天黑前，进入黄昏阶段。');
-  else announce(room, '天黑请闭眼。');
+  if (stage === 'dusk') announce(room, '天黑前，进入黄昏阶段。', 0, 'stage', 'dusk');
+  else announce(room, '天黑请闭眼。', 0, 'stage', 'night');
   advanceQueue(room);
 }
 
@@ -515,7 +516,7 @@ function advanceQueue(room) {
   }
   const item = room.queue[room.qIndex];
   const r = ROLES[item.role];
-  announce(room, r.hint || `请【${r.name}】睁眼。`);
+  announce(room, r.hint || `请【${r.name}】睁眼。`, room.qIndex + 1, 'open', item.stage);
   // 没有玩家持有该角色时（只在中央），仅播报睁眼/闭眼流程，不请求输入也不执行效果
   const needsInput = item.seats.length > 0 && roleNeedsInput(item.role, room, item.seats);
   room.currentAction = { role: item.role, stage: item.stage, seats: item.seats, submissions: {}, needsInput };
@@ -541,7 +542,7 @@ function advanceQueue(room) {
 
 // 信息类角色闭眼后推进
 function closeAndAdvance(room, r) {
-  announce(room, `请【${r.name}】闭眼。`);
+  announce(room, `请【${r.name}】闭眼。`, room.qIndex + 1, 'close', room.queue[0].stage);
   room.currentAction = null;
   pushState(room);
   // 闭眼后统一停留 2 秒，再给下一位角色睁眼
@@ -553,12 +554,9 @@ function finishAutoAction(room, r) {
   applyAction(room, room.currentAction, room.currentAction.submissions);
   room.currentAction = null;
   pushState(room);
-  // 操作完成后停顿 5 秒（让玩家看清结果、语音/文字播报完整展示），再闭眼；
-  // 闭眼后再统一停留 2 秒，给玩家反应时间，然后才进入下一位角色
-  room.nightTimer = setTimeout(() => {
-    announce(room, `请【${r.name}】闭眼。`);
-    room.nightTimer = setTimeout(() => advanceQueue(room), 2000);
-  }, 5000);
+  // 操作完成后立即闭眼（不再额外停留）；闭眼后再统一停留 2 秒，给玩家反应时间，再进入下一位角色
+  announce(room, `请【${r.name}】闭眼。`, room.qIndex + 1, 'close', room.queue[0].stage);
+  room.nightTimer = setTimeout(() => advanceQueue(room), 2000);
 }
 
 function roleNeedsInput(role, room, seats) {
