@@ -879,6 +879,24 @@ let _ttsSeq = 0;                 // 朗读序列号：cancel() 触发的旧 onen
 let _serverTtsFails = 0;         // 服务端 TTS 连续失败次数（单次失败不永久禁用，避免偶发网络/解码抖动导致整局无语音）
 let _serverTtsWarned = false;    // 服务端 TTS 不可用提示是否已弹过
 let _serverAudioEl = null;       // 当前正在播放的服务端语音 <audio> 实例（供 stopAnnounce 停止）
+let _audioUnlocked = false;      // 移动端 WebView 自动播放策略：是否已在用户手势中预热解锁
+// 一段极短静音 WAV（data URI），仅用于在首次用户手势中「激活」媒体播放权限，
+// 否则一夜狼人杀的播报由服务端 SSE 推送触发，不在用户点击栈内，浏览器会拒绝 play()。
+const SILENCE_WAV = 'data:audio/wav;base64,UklGRoQJAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YWAJAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+function _unlockAudio() {
+  if (_audioUnlocked) return;
+  _audioUnlocked = true;
+  try {
+    if (!_serverAudioEl) _serverAudioEl = new Audio();
+    _serverAudioEl.preload = 'auto';
+    _serverAudioEl.src = SILENCE_WAV;
+    const p = _serverAudioEl.play();
+    if (p && p.catch) p.then(() => { try { _serverAudioEl && _serverAudioEl.pause(); } catch (_) {} }).catch(() => {});
+  } catch (_) {}
+}
+// 首次任意用户手势即预热音频（移动端 WebView 的自动播放策略要求）
+['touchstart', 'touchend', 'click', 'keydown'].forEach(ev =>
+  document.addEventListener(ev, _unlockAudio, { passive: true, once: false }));
 let _localTtsFailed = false;     // 本地语音引擎是否确认不可用（用于提示文案）
 let _ttsDebug = /[?&]ttsdebug=1/.test(location.search || '');  // URL 带 ?ttsdebug=1 时打印语音链路调试日志
 // 注：现已统一走服务端内置 Piper TTS（自托管、免费、国内可部署），移除了百度 key 与浏览器直连微软兜底。
@@ -1103,21 +1121,19 @@ function _speakOne(text) {
 }
 
 /** 服务端内置 Piper TTS：本地无语音引擎时（如 Via / 小米自带浏览器），从 /api/tts 拉取合成语音用 <audio> 播放。
- *  每条播报使用独立的 Audio 实例 + 一次性 done 守卫，避免旧监听叠加导致「文本领先语音」的串台问题；
- *  音频 ended（或 play 被拒/出错）→ 走与本地 onend 相同的 _afterUtterance 流程（含「闭眼」回执 nightAck）；
- *  单次失败不永久禁用服务端语音（移动 WebView 常有偶发网络/解码抖动），连续失败 3 次才提示降级。 */
+ *  复用已解锁的全局 Audio 元素 + 一次性 done 守卫，避免旧监听叠加导致「文本领先语音」的串台问题；
+ *  play() 被自动播放策略拒绝时：若尚未解锁，则挂到下一次用户手势再播；已解锁仍失败才回退文字，
+ *  且回退时通过 _afterUtterance 推进，避免文本抢跑（若音频实际已在播，正常等 onended 推进）。 */
 function _speakServer(text, fallback) {
   const u = '/api/tts?text=' + encodeURIComponent(text);
   let done = false;
-  const el = new Audio();
-  el.preload = 'auto';
-  _serverAudioEl = el;
+  if (!_serverAudioEl) { _serverAudioEl = new Audio(); _serverAudioEl.preload = 'auto'; }
+  const el = _serverAudioEl;
   const dbg = (...a) => { if (_ttsDebug) console.log('[tts-debug]', ...a); };
-  dbg('start', JSON.stringify(text.slice(0, 16)));
+  dbg('start', JSON.stringify(text.slice(0, 16)), 'unlocked=' + _audioUnlocked);
   const finish = (ok, reason) => {
     if (done) return; done = true;        // 一次性守卫：ended/error/play被拒 仅触发一次推进
-    try { el.onended = el.onerror = null; el.removeAttribute('src'); el.load(); } catch (_) {}
-    if (_serverAudioEl === el) _serverAudioEl = null;
+    el.onended = el.onerror = null;
     if (ok) { _serverTtsFails = 0; dbg('ended ok'); _afterUtterance(); return; }
     _serverTtsFails++;
     dbg('fail', reason || '', 'fails=' + _serverTtsFails);
@@ -1134,13 +1150,27 @@ function _speakServer(text, fallback) {
     const code = el.error && el.error.code;
     finish(false, 'audio.error code=' + code);
   };
+  // 取消上一条可能残留的加载/播放，避免串台
+  try { el.pause(); } catch (_) {}
   el.src = u;
-  const p = el.play();
-  if (p && p.catch) p.catch((e) => {
-    dbg('play() rejected:', e && e.name || e);
-    // 自动播放被拒：重试一次本条，仍失败才回退文字，避免直接跳过导致文本与语音错位
-    try { const p2 = el.play(); if (p2 && p2.catch) p2.catch(() => finish(false, 'play rejected twice')); } catch (_) { finish(false, 'play rejected+throw'); }
-  });
+  const tryPlay = (depth) => {
+    const p = el.play();
+    if (!p || !p.catch) return; // 老浏览器无 promise：靠 onended/onerror
+    p.catch((e) => {
+      dbg('play rejected', e && e.name || e, 'depth=' + depth);
+      if (depth < 1) { try { tryPlay(depth + 1); } catch (_) { finish(false, 'play rejected twice'); } return; }
+      // 已重试仍被拒：若尚未解锁，则等待下一次用户手势时再播本条（不立即推进文本）
+      if (!_audioUnlocked) {
+        const onTouch = () => { document.removeEventListener('touchstart', onTouch); document.removeEventListener('click', onTouch); _unlockAudio(); tryPlay(0); };
+        document.addEventListener('touchstart', onTouch, { once: true, passive: true });
+        document.addEventListener('click', onTouch, { once: true });
+        // 仍未解锁期间：本条文本先不推进，等手势触发真正出声后再推进，避免文本抢跑
+        return;
+      }
+      finish(false, 'play rejected twice');
+    });
+  };
+  tryPlay(0);
 }
 
 /** 一条朗读结束（onend/onerror/看门狗）后推进到下一条 */
