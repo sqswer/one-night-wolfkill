@@ -66,32 +66,37 @@ function extract(archive, destDir) {
   _flattenPiper(destDir);
 }
 
-// Piper 的 tar 包会把文件放在一个同名子目录（如 piper_linux_x86_64/）里，
-// 需要把该子目录内的所有文件（piper 二进制 + 配套 .so）上移到 destDir 根，
+// Piper 的 tar 包会把文件放在一个子目录（如 piper/）里，
+// 需要把该子目录内的所有文件（piper 二进制 + 配套 .so + espeak-ng-data 等）上移到 destDir 根，
 // 保证 tts-bin/piper 与依赖库同目录（否则运行时找不到 libespeak-ng 等）。
+// 注意：子目录本身也叫 piper，里面二进制也叫 piper，直接移动会撞名，故先给子目录改名再平铺。
 function _flattenPiper(dir) {
   const binName = process.platform === 'win32' ? 'piper.exe' : 'piper';
   if (fs.existsSync(path.join(dir, binName))) return; // 已经在根目录，无需处理
-  const findBin = (d) => {
-    let res = null;
+  // 找包含 piper 二进制的子目录
+  const findDir = (d) => {
     for (const e of fs.readdirSync(d)) {
       const full = path.join(d, e);
       let st; try { st = fs.statSync(full); } catch (_) { continue; }
-      if (st.isDirectory()) { const r = findBin(full); if (r) return r; }
-      else if (e === binName) return full;
+      if (st.isDirectory()) {
+        if (fs.existsSync(path.join(full, binName))) return full;
+        const r = findDir(full); if (r) return r;
+      }
     }
-    return res;
+    return null;
   };
-  const bin = findBin(dir);
-  if (!bin) { console.warn('⚠️ 未在压缩包中找到 ' + binName + '，安装可能不完整'); return; }
-  const parent = path.dirname(bin);
-  if (parent === dir) return;
-  for (const f of fs.readdirSync(parent)) {
-    const src = path.join(parent, f);
+  const sub = findDir(dir);
+  if (!sub) { console.warn('⚠️ 未在压缩包中找到包含 ' + binName + ' 的子目录，安装可能不完整'); return; }
+  // 先把子目录改名，避免内部 piper 二进制与子目录同名导致移动冲突
+  const tmp = path.join(dir, '_piper_flatten_tmp');
+  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
+  fs.renameSync(sub, tmp);
+  for (const f of fs.readdirSync(tmp)) {
+    const src = path.join(tmp, f);
     const dst = path.join(dir, f);
     try { fs.renameSync(src, dst); } catch (_) {}
   }
-  try { fs.rmdirSync(parent, { recursive: true }); } catch (_) {}
+  try { fs.rmdirSync(tmp, { recursive: true }); } catch (_) {}
 }
 
 (async () => {
