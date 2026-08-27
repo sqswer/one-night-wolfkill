@@ -880,6 +880,7 @@ let _serverTtsFails = 0;         // 服务端 TTS 连续失败次数（单次失
 let _serverTtsWarned = false;    // 服务端 TTS 不可用提示是否已弹过
 let _serverAudioEl = null;       // 当前正在播放的服务端语音 <audio> 实例（供 stopAnnounce 停止）
 let _localTtsFailed = false;     // 本地语音引擎是否确认不可用（用于提示文案）
+let _ttsDebug = /[?&]ttsdebug=1/.test(location.search || '');  // URL 带 ?ttsdebug=1 时打印语音链路调试日志
 // 注：现已统一走服务端内置 Piper TTS（自托管、免费、国内可部署），移除了百度 key 与浏览器直连微软兜底。
 
 function _ttsLoadVoices() {
@@ -1111,12 +1112,15 @@ function _speakServer(text, fallback) {
   const el = new Audio();
   el.preload = 'auto';
   _serverAudioEl = el;
-  const finish = (ok) => {
+  const dbg = (...a) => { if (_ttsDebug) console.log('[tts-debug]', ...a); };
+  dbg('start', JSON.stringify(text.slice(0, 16)));
+  const finish = (ok, reason) => {
     if (done) return; done = true;        // 一次性守卫：ended/error/play被拒 仅触发一次推进
     try { el.onended = el.onerror = null; el.removeAttribute('src'); el.load(); } catch (_) {}
     if (_serverAudioEl === el) _serverAudioEl = null;
-    if (ok) { _serverTtsFails = 0; _afterUtterance(); return; }
+    if (ok) { _serverTtsFails = 0; dbg('ended ok'); _afterUtterance(); return; }
     _serverTtsFails++;
+    dbg('fail', reason || '', 'fails=' + _serverTtsFails);
     if (_serverTtsFails >= 3 && !_serverTtsWarned) {
       _serverTtsWarned = true;
       toast('服务端语音连续失败，已改为文字显示。建议检查 Bonto 服务端 Piper TTS。');
@@ -1124,12 +1128,17 @@ function _speakServer(text, fallback) {
     _afterUtterance();
   };
   el.onended = () => finish(true);
-  el.onerror = () => finish(false);
+  el.onerror = () => {
+    // MediaError.code: 1=ABORTED 2=NETWORK 3=DECODE 4=SRC_NOT_SUPPORTED
+    const code = el.error && el.error.code;
+    finish(false, 'audio.error code=' + code);
+  };
   el.src = u;
   const p = el.play();
-  if (p && p.catch) p.catch(() => {
+  if (p && p.catch) p.catch((e) => {
+    dbg('play() rejected:', e && e.name || e);
     // 自动播放被拒：重试一次本条，仍失败才回退文字，避免直接跳过导致文本与语音错位
-    try { const p2 = el.play(); if (p2 && p2.catch) p2.catch(() => finish(false)); } catch (_) { finish(false); }
+    try { const p2 = el.play(); if (p2 && p2.catch) p2.catch(() => finish(false, 'play rejected twice')); } catch (_) { finish(false, 'play rejected+throw'); }
   });
 }
 
