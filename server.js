@@ -1315,6 +1315,7 @@ const server = http.createServer((req, res) => {
     if (!_tts || !_tts.available()) { console.error('[tts] /api/tts 收到请求但 TTS 未启用(available=false)'); res.writeHead(501); res.end('TTS 未启用'); return; }
     const voice = (parsed.query.voice || '').toString() || undefined;
     _tts.synthesize(text, voice).then(buf => {
+      console.log('[tts] 合成成功 len=' + (buf && buf.length) + ' text=' + JSON.stringify(text.slice(0, 20)));
       res.writeHead(200, {
         'Content-Type': _tts.contentType(),
         'Content-Length': buf.length,

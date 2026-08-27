@@ -31,6 +31,8 @@ function _synthesizePiper(text) {
     const bin = _piperBin();
     const model = _piperModel();
     const binDir = path.dirname(bin);
+    // 必须先确保缓存目录存在，否则 Piper 写不进临时 wav 会直接失败
+    try { fs.mkdirSync(CACHE_DIR, { recursive: true }); } catch (_) {}
     const tmp = path.join(CACHE_DIR, 'piper_' + crypto.randomBytes(8).toString('hex') + '.wav');
     // 让 espeak-ng 找到随包的数据目录，并优先从二进制同目录加载 .so 依赖
     const env = Object.assign({}, process.env, {
