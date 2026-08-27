@@ -1121,6 +1121,7 @@ function _speakServer(text, fallback) {
     if (ok) { _serverTtsFails = 0; dbg('ended ok'); _afterUtterance(); return; }
     _serverTtsFails++;
     dbg('fail', reason || '', 'fails=' + _serverTtsFails);
+    if (_ttsDebug && reason) toast('TTS调试: ' + reason);
     if (_serverTtsFails >= 3 && !_serverTtsWarned) {
       _serverTtsWarned = true;
       toast('服务端语音连续失败，已改为文字显示。建议检查 Bonto 服务端 Piper TTS。');
