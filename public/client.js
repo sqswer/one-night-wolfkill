@@ -876,7 +876,7 @@ let _ttsRetryCount = 0;        // 当前语句静默失败重试次数
 let _ttsWatchdog = null;        // 单条朗读的超时看门狗（防 onend 不触发导致队列卡死）
 let _ttsStartWatchdog = null;   // 检测 speak 是否真正启动的看门狗
 let _ttsSeq = 0;                 // 朗读序列号：cancel() 触发的旧 onend 不会误推进队列
-let _serverTtsState = null;      // 服务端 TTS 可用性：null=未知, true=可用, false=不可用（失败一次后不再重试）
+let _serverTtsFails = 0;         // 服务端 TTS 连续失败次数（单次失败不永久禁用，避免偶发网络/解码抖动导致整局无语音）
 let _serverTtsWarned = false;    // 服务端 TTS 不可用提示是否已弹过
 let _serverAudioEl = null;       // 当前正在播放的服务端语音 <audio> 实例（供 stopAnnounce 停止）
 let _localTtsFailed = false;     // 本地语音引擎是否确认不可用（用于提示文案）
@@ -1104,9 +1104,8 @@ function _speakOne(text) {
 /** 服务端内置 Piper TTS：本地无语音引擎时（如 Via / 小米自带浏览器），从 /api/tts 拉取合成语音用 <audio> 播放。
  *  每条播报使用独立的 Audio 实例 + 一次性 done 守卫，避免旧监听叠加导致「文本领先语音」的串台问题；
  *  音频 ended（或 play 被拒/出错）→ 走与本地 onend 相同的 _afterUtterance 流程（含「闭眼」回执 nightAck）；
- *  若服务端 TTS 不可用，则标记失败仅文字显示，绝不卡住队列。 */
+ *  单次失败不永久禁用服务端语音（移动 WebView 常有偶发网络/解码抖动），连续失败 3 次才提示降级。 */
 function _speakServer(text, fallback) {
-  if (_serverTtsState === false) { _afterUtterance(); return; }
   const u = '/api/tts?text=' + encodeURIComponent(text);
   let done = false;
   const el = new Audio();
@@ -1116,10 +1115,12 @@ function _speakServer(text, fallback) {
     if (done) return; done = true;        // 一次性守卫：ended/error/play被拒 仅触发一次推进
     try { el.onended = el.onerror = null; el.removeAttribute('src'); el.load(); } catch (_) {}
     if (_serverAudioEl === el) _serverAudioEl = null;
-    if (ok) { _serverTtsState = true; _afterUtterance(); return; }
-    if (_serverTtsState === false) return;  // 此前已判定不可用，避免重复提示
-    _serverTtsState = false;
-    if (!_serverTtsWarned) { _serverTtsWarned = true; toast('服务端语音不可用，已改为文字显示。建议确认 Bonto 服务端已部署 Piper TTS。'); }
+    if (ok) { _serverTtsFails = 0; _afterUtterance(); return; }
+    _serverTtsFails++;
+    if (_serverTtsFails >= 3 && !_serverTtsWarned) {
+      _serverTtsWarned = true;
+      toast('服务端语音连续失败，已改为文字显示。建议检查 Bonto 服务端 Piper TTS。');
+    }
     _afterUtterance();
   };
   el.onended = () => finish(true);
