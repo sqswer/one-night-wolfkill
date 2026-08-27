@@ -876,16 +876,11 @@ let _ttsRetryCount = 0;        // 当前语句静默失败重试次数
 let _ttsWatchdog = null;        // 单条朗读的超时看门狗（防 onend 不触发导致队列卡死）
 let _ttsStartWatchdog = null;   // 检测 speak 是否真正启动的看门狗
 let _ttsSeq = 0;                 // 朗读序列号：cancel() 触发的旧 onend 不会误推进队列
-let _audioEl = null;             // 服务端 TTS 兜底用的 <audio> 元素（本地无引擎时播放服务端合成的音频）
 let _serverTtsState = null;      // 服务端 TTS 可用性：null=未知, true=可用, false=不可用（失败一次后不再重试）
 let _serverTtsWarned = false;    // 服务端 TTS 不可用提示是否已弹过
+let _serverAudioEl = null;       // 当前正在播放的服务端语音 <audio> 实例（供 stopAnnounce 停止）
 let _localTtsFailed = false;     // 本地语音引擎是否确认不可用（用于提示文案）
-let _edgeTtsState = null;        // 浏览器直连微软 Edge TTS 可用性：null=未知, true=可用, false=不可用（失败一次后不再重试）
-let _edgeTtsWarned = false;      // 浏览器直连不可用的提示是否已弹过
-// 服务端 TTS 语音名（与服务端 tts.js 的 DEFAULT_VOICE 对应；如需切换男声可改为 'zh-CN-YunxiNeural'）
-const TTS_VOICE = 'zh-CN-XiaoxiaoNeural';
-// 微软 Edge TTS 公开端点（浏览器可直连，无需 key；用于本地无引擎的浏览器如 Via / 小米自带浏览器）
-const EDGE_TTS_WS = 'wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=6A5AA1D4EAFF4E9FB37E23D68491D6F4&ConnectionId=';
+// 注：现已统一走服务端内置 Piper TTS（自托管、免费、国内可部署），移除了百度 key 与浏览器直连微软兜底。
 
 function _ttsLoadVoices() {
   try {
@@ -943,7 +938,7 @@ function unlockTTS() {
       if (!_ttsReady && !_ttsWarned) {
         _ttsWarned = true;
         _localTtsFailed = true;
-        toast('本地无语音引擎，正在尝试浏览器直连微软语音（需手机联网）；若不可用将仅显示文字。');
+        toast('本地无语音引擎，将使用服务端内置语音（已部署 Piper 即可听到）；若服务端不可用将仅显示文字。');
       }
     }, 1500);
   } catch (_) { _ttsUnlocked = true; _ttsDrain(); }
@@ -1099,108 +1094,42 @@ function _ttsDoSpeak(text, attempt) {
 function _speakOne(text) {
   _ttsRetryCount = 0; _ttsCurrentText = text;
   // 本地语音引擎可用（有中文语音）→ 走浏览器内置 Web Speech；
-  // 否则（Via / 小米自带浏览器等无引擎）→ 优先服务端 TTS（现可接百度，国内稳定），
-  // 服务端失败再回退浏览器直连微软 Edge TTS，再失败才纯文字（绝不卡住队列）。
+  // 否则（Via / 小米自带浏览器等无引擎）→ 走服务端内置 Piper TTS，
+  // 服务端失败则仅文字显示，绝不卡住队列。
   const localOk = _ttsSupported && _ttsVoices.length > 0;
   if (localOk) _ttsDoSpeak(text, 0);
-  else _speakServer(text, () => _speakEdgeWS(text, () => {}));
+  else _speakServer(text, () => {});
 }
 
-/** 浏览器直连微软 Edge TTS：本地无语音引擎时，由手机浏览器直接连微软语音服务拉取 mp3 播放。
- *  不依赖部署服务器联网、也不依赖本地 speechSynthesis 引擎，只要手机能上网即可出声。
- *  onended（或 play 被拒/出错/超时）→ 走与本地 onend 相同的 _afterUtterance 流程（含「闭眼」回执 nightAck）；
- *  若直连不可用（网络/跨域被拦），则调用 fallback（回退服务端 TTS / 纯文字）。 */
-function _speakEdgeWS(text, fallback) {
-  if (_edgeTtsState === false) { fallback(); return; }
-  if (!('WebSocket' in window)) { _edgeTtsState = false; fallback(); return; }
-  let connId = '';
-  for (let i = 0; i < 32; i++) connId += Math.floor(Math.random() * 16).toString(16);
-  let ws;
-  try { ws = new WebSocket(EDGE_TTS_WS + connId); }
-  catch (e) { _edgeTtsState = false; if (!_edgeTtsWarned) { _edgeTtsWarned = true; toast('本地无语音引擎，浏览器直连微软语音失败，已改为文字显示。'); } fallback(); return; }
-  ws.binaryType = 'arraybuffer';
-  const chunks = [];
-  let played = false;
-  const totalTimer = setTimeout(() => {
-    if (!played) { if (chunks.length) playCollected(); else fail(); }
-  }, 12000);
-
-  function escapeXml(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
-  }
-  // 微软每条音频消息 = 文本头 + 二进制 mp3 拼在同一帧；找到 \r\n\r\n 之后的部分即为音频字节
-  function findAudio(buf) {
-    const bytes = new Uint8Array(buf);
-    for (let i = 0; i < bytes.length - 3; i++) {
-      if (bytes[i] === 13 && bytes[i + 1] === 10 && bytes[i + 2] === 13 && bytes[i + 3] === 10)
-        return bytes.subarray(i + 4);
-    }
-    return bytes;
-  }
-  function playCollected() {
-    if (played) return; played = true;
-    clearTimeout(totalTimer);
-    try { ws.close(); } catch (_) {}
-    if (!chunks.length) { fail(); return; }
-    const blob = new Blob(chunks, { type: 'audio/mpeg' });
-    const url = URL.createObjectURL(blob);
-    if (!_audioEl) _audioEl = new Audio();
-    _audioEl.pause();
-    _audioEl.src = url;
-    _audioEl.onended = () => { _edgeTtsState = true; try { URL.revokeObjectURL(url); } catch (_) {} _afterUtterance(); };
-    _audioEl.onerror = () => { _edgeTtsState = true; _afterUtterance(); };
-    const p = _audioEl.play();
-    if (p && p.catch) p.catch(() => { _edgeTtsState = true; _afterUtterance(); });
-  }
-  function fail() {
-    if (played) return; played = true;
-    clearTimeout(totalTimer);
-    try { ws.close(); } catch (_) {}
-    _edgeTtsState = false;
-    if (!_edgeTtsWarned) { _edgeTtsWarned = true; toast('本地无语音引擎，浏览器直连微软语音失败，已改为文字显示。'); }
-    fallback();
-  }
-  ws.onmessage = (ev) => {
-    if (typeof ev.data === 'string') {
-      if (ev.data.indexOf('turn.end') >= 0) playCollected();
-      return;
-    }
-    try { const audio = findAudio(ev.data); if (audio && audio.length) chunks.push(audio); } catch (_) {}
-  };
-  ws.onerror = () => { fail(); };
-  ws.onclose = () => { if (!played && chunks.length) playCollected(); };
-  ws.onopen = () => {
-    const cfg = 'X-RequestId: ' + connId + '\r\nContent-Type: application/json; charset=utf-8\r\nPath: speech.config\r\n\r\n' +
-      JSON.stringify({ context: { synthesis: { audio: { metadataoptions: { sentenceBoundaryEnabled: false, wordBoundaryEnabled: false }, outputFormat: 'audio-24khz-48kbitrate-mono-mp3' } } } });
-    ws.send(cfg);
-    const ssml = "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='zh-CN'><voice name='" + TTS_VOICE + "'>" + escapeXml(text) + '</voice></speak>';
-    ws.send('X-RequestId: ' + connId + '\r\nContent-Type: application/ssml+xml\r\nPath: ssml\r\n\r\n' + ssml);
-  };
-}
-
-/** 服务端 TTS 兜底：本地无语音引擎时，从 /api/tts 拉取合成的 mp3 用 <audio> 播放。
+/** 服务端内置 Piper TTS：本地无语音引擎时（如 Via / 小米自带浏览器），从 /api/tts 拉取合成语音用 <audio> 播放。
+ *  每条播报使用独立的 Audio 实例 + 一次性 done 守卫，避免旧监听叠加导致「文本领先语音」的串台问题；
  *  音频 ended（或 play 被拒/出错）→ 走与本地 onend 相同的 _afterUtterance 流程（含「闭眼」回执 nightAck）；
- *  若服务端 TTS 不可用，则标记失败，调用 fallback（如浏览器直连微软）继续尝试；无 fallback 时仅文字显示，绝不卡住队列。 */
+ *  若服务端 TTS 不可用，则标记失败仅文字显示，绝不卡住队列。 */
 function _speakServer(text, fallback) {
-  if (_serverTtsState === false) { if (fallback) fallback(); else _afterUtterance(); return; }
-  if (!_audioEl) { _audioEl = new Audio(); _audioEl.preload = 'auto'; }
-  const u = '/api/tts?text=' + encodeURIComponent(text) + '&voice=' + encodeURIComponent(TTS_VOICE);
-  const onEnd = () => { _cleanupAudio(); _serverTtsState = true; _afterUtterance(); };
-  const onFail = () => {
-    _cleanupAudio();
-    if (_serverTtsState === false) return;   // 已处理过
+  if (_serverTtsState === false) { _afterUtterance(); return; }
+  const u = '/api/tts?text=' + encodeURIComponent(text);
+  let done = false;
+  const el = new Audio();
+  el.preload = 'auto';
+  _serverAudioEl = el;
+  const finish = (ok) => {
+    if (done) return; done = true;        // 一次性守卫：ended/error/play被拒 仅触发一次推进
+    try { el.onended = el.onerror = null; el.removeAttribute('src'); el.load(); } catch (_) {}
+    if (_serverAudioEl === el) _serverAudioEl = null;
+    if (ok) { _serverTtsState = true; _afterUtterance(); return; }
+    if (_serverTtsState === false) return;  // 此前已判定不可用，避免重复提示
     _serverTtsState = false;
-    if (fallback) fallback();                // 服务端失败 → 再试浏览器直连微软
-    else { if (!_serverTtsWarned) { _serverTtsWarned = true; toast('语音不可用，已改为文字显示。建议用 Chrome / Edge 获得语音。'); } _afterUtterance(); }
+    if (!_serverTtsWarned) { _serverTtsWarned = true; toast('服务端语音不可用，已改为文字显示。建议确认 Bonto 服务端已部署 Piper TTS。'); }
+    _afterUtterance();
   };
-  function _cleanupAudio() { if (_audioEl) { _audioEl.removeEventListener('ended', onEnd); _audioEl.removeEventListener('error', onErr); } }
-  const onErr = onFail;
-  _audioEl.addEventListener('ended', onEnd);
-  _audioEl.addEventListener('error', onErr);
-  _audioEl.src = u;
-  const p = _audioEl.play();
-  if (p && p.catch) p.catch(() => { _cleanupAudio(); onFail(); });
+  el.onended = () => finish(true);
+  el.onerror = () => finish(false);
+  el.src = u;
+  const p = el.play();
+  if (p && p.catch) p.catch(() => {
+    // 自动播放被拒：重试一次本条，仍失败才回退文字，避免直接跳过导致文本与语音错位
+    try { const p2 = el.play(); if (p2 && p2.catch) p2.catch(() => finish(false)); } catch (_) { finish(false); }
+  });
 }
 
 /** 一条朗读结束（onend/onerror/看门狗）后推进到下一条 */
@@ -1227,7 +1156,7 @@ function stopAnnounce() {
   clearTimeout(_ttsStartWatchdog);
   if (_nightAckFallback) { clearTimeout(_nightAckFallback); _nightAckFallback = null; }
   if ('speechSynthesis' in window) try { speechSynthesis.cancel(); } catch (_) {}
-  if (_audioEl) { try { _audioEl.pause(); _audioEl.removeAttribute('src'); _audioEl.load(); } catch (_) {} }
+  if (_serverAudioEl) { try { _serverAudioEl.pause(); _serverAudioEl.removeAttribute('src'); _serverAudioEl.load(); } catch (_) {} _serverAudioEl = null; }
 }
 
 $('#btn-tts').onclick = () => {

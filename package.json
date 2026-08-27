@@ -1,7 +1,7 @@
 {
   "name": "one-night-werewolf-online",
   "version": "1.0.0",
-  "description": "一夜狼人杀 · 在线版（零依赖 Node.js + 浏览器内置语音；可选 edge-tts 提供无引擎浏览器的服务端语音兜底）",
+  "description": "一夜狼人杀 · 在线版（零依赖 Node.js + 浏览器内置语音；服务端内置 Piper TTS 为无引擎浏览器提供语音兜底）",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -9,8 +9,5 @@
   },
   "engines": {
     "node": ">=16"
-  },
-  "optionalDependencies": {
-    "edge-tts": ">=1.0.0"
   }
 }

@@ -19,8 +19,8 @@ const path = require('path');
 const crypto = require('crypto');
 const url = require('url');
 
-// 服务端 TTS（兜底语音）：本地无语音引擎的浏览器（如 via、小米自带浏览器）由服务端合成音频后播放。
-// 模块内部懒加载 edge-tts，缺失时 available() 为 false，由客户端降级为纯文字，不中断游戏。
+// 服务端 TTS（兜底语音）：本地无语音引擎的浏览器（如 via、小米自带浏览器）由服务端 Piper 合成音频后播放。
+// 仅依赖本地部署的 Piper 二进制+模型（见 scripts/install_piper.js），无需联网/无需 key；缺失时 available() 为 false，由客户端降级为纯文字，不中断游戏。
 let _tts = null;
 try { _tts = require('./tts'); } catch (_) { _tts = null; }
 console.log('[tts] 模块加载:', _tts ? ('OK，provider=' + (_tts.PROVIDER || '?') + '，available=' + _tts.available()) : '失败(未启用)');
