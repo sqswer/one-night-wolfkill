@@ -23,6 +23,7 @@ const url = require('url');
 // 模块内部懒加载 edge-tts，缺失时 available() 为 false，由客户端降级为纯文字，不中断游戏。
 let _tts = null;
 try { _tts = require('./tts'); } catch (_) { _tts = null; }
+console.log('[tts] 模块加载:', _tts ? ('OK，provider=' + (_tts.PROVIDER || '?') + '，available=' + _tts.available()) : '失败(未启用)');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -1311,7 +1312,7 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && pathname === '/api/tts') {
     const text = (parsed.query.text || '').toString();
     if (!text || text.length > 500) { res.writeHead(400); res.end('bad text'); return; }
-    if (!_tts || !_tts.available()) { res.writeHead(501); res.end('TTS 未启用'); return; }
+    if (!_tts || !_tts.available()) { console.error('[tts] /api/tts 收到请求但 TTS 未启用(available=false)'); res.writeHead(501); res.end('TTS 未启用'); return; }
     const voice = (parsed.query.voice || '').toString() || undefined;
     _tts.synthesize(text, voice).then(buf => {
       res.writeHead(200, {
@@ -1321,7 +1322,7 @@ const server = http.createServer((req, res) => {
         'X-Accel-Buffering': 'no'
       });
       res.end(buf);
-    }).catch(e => { res.writeHead(502); res.end('TTS 失败: ' + (e && e.message || e)); });
+    }).catch(e => { console.error('[tts] 合成失败:', e && e.stack || e); res.writeHead(502); res.end('TTS 失败: ' + (e && e.message || e)); });
     return;
   }
 

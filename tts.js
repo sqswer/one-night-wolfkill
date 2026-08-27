@@ -30,7 +30,13 @@ function _synthesizePiper(text) {
   return new Promise((resolve, reject) => {
     const bin = _piperBin();
     const model = _piperModel();
+    const binDir = path.dirname(bin);
     const tmp = path.join(CACHE_DIR, 'piper_' + crypto.randomBytes(8).toString('hex') + '.wav');
+    // 让 espeak-ng 找到随包的数据目录，并优先从二进制同目录加载 .so 依赖
+    const env = Object.assign({}, process.env, {
+      ESPEAK_DATA_PATH: path.join(binDir, 'espeak-ng-data'),
+      LD_LIBRARY_PATH: binDir + (process.env.LD_LIBRARY_PATH ? (':' + process.env.LD_LIBRARY_PATH) : ''),
+    });
     let done = false;
     const finish = (err, buf) => {
       if (done) return; done = true;
@@ -38,12 +44,21 @@ function _synthesizePiper(text) {
       resolve(buf);
     };
     let cp;
+    const errChunks = [];
     try {
-      cp = child_process.execFile(bin, ['--model', model, '--output-file', tmp], { timeout: 30000 }, (err) => {
-        if (err) { try { fs.unlinkSync(tmp); } catch (_) {} return finish(err); }
-        fs.promises.readFile(tmp).then(b => { fs.promises.unlink(tmp).catch(() => {}); finish(null, b); }).catch(finish);
-      });
+      cp = child_process.spawn(bin, ['--model', model, '--output-file', tmp], { env, timeout: 30000 });
+      if (cp.stderr) cp.stderr.on('data', d => errChunks.push(d));
     } catch (e) { return finish(e); }
+    cp.on('error', e => { try { fs.unlinkSync(tmp); } catch (_) {} finish(e); });
+    cp.on('close', code => {
+      if (done) return;
+      if (code !== 0) {
+        const msg = Buffer.concat(errChunks).toString('utf8').trim() || ('Piper 退出码 ' + code);
+        try { fs.unlinkSync(tmp); } catch (_) {}
+        return finish(new Error(msg));
+      }
+      fs.promises.readFile(tmp).then(b => { fs.promises.unlink(tmp).catch(() => {}); finish(null, b); }).catch(finish);
+    });
     if (cp.stdin) {
       cp.stdin.on('error', () => {});
       try { cp.stdin.write(text); cp.stdin.end(); } catch (_) {}
