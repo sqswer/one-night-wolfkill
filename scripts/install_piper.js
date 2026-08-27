@@ -63,6 +63,35 @@ function download(url, dest) {
 function extract(archive, destDir) {
   console.log('解压:', archive);
   execFileSync('tar', ['xf', archive, '-C', destDir], { stdio: 'inherit' });
+  _flattenPiper(destDir);
+}
+
+// Piper 的 tar 包会把文件放在一个同名子目录（如 piper_linux_x86_64/）里，
+// 需要把该子目录内的所有文件（piper 二进制 + 配套 .so）上移到 destDir 根，
+// 保证 tts-bin/piper 与依赖库同目录（否则运行时找不到 libespeak-ng 等）。
+function _flattenPiper(dir) {
+  const binName = process.platform === 'win32' ? 'piper.exe' : 'piper';
+  if (fs.existsSync(path.join(dir, binName))) return; // 已经在根目录，无需处理
+  const findBin = (d) => {
+    let res = null;
+    for (const e of fs.readdirSync(d)) {
+      const full = path.join(d, e);
+      let st; try { st = fs.statSync(full); } catch (_) { continue; }
+      if (st.isDirectory()) { const r = findBin(full); if (r) return r; }
+      else if (e === binName) return full;
+    }
+    return res;
+  };
+  const bin = findBin(dir);
+  if (!bin) { console.warn('⚠️ 未在压缩包中找到 ' + binName + '，安装可能不完整'); return; }
+  const parent = path.dirname(bin);
+  if (parent === dir) return;
+  for (const f of fs.readdirSync(parent)) {
+    const src = path.join(parent, f);
+    const dst = path.join(dir, f);
+    try { fs.renameSync(src, dst); } catch (_) {}
+  }
+  try { fs.rmdirSync(parent, { recursive: true }); } catch (_) {}
 }
 
 (async () => {
@@ -71,13 +100,20 @@ function extract(archive, destDir) {
     const a = piperAsset();
     const binArchive = path.join(OUT, 'piper_archive.' + (a.ext === 'zip' ? 'zip' : 'tgz'));
     await download(a.url, binArchive);
+    // 校验确实是 gzip（前 2 字节 0x1f 0x8b），否则多半下到了错误页
+    const magic = fs.readFileSync(binArchive, { start: 0, end: 2 });
+    if (!(magic[0] === 0x1f && magic[1] === 0x8b)) {
+      const peek = fs.readFileSync(binArchive, 'utf8').slice(0, 200).replace(/\s+/g, ' ');
+      throw new Error('下载到的不是有效的 .tar.gz（可能是错误页/被拦截）：' + peek);
+    }
     extract(binArchive, OUT);
     if (process.platform !== 'win32') {
       const binPath = path.join(OUT, 'piper');
       try { fs.chmodSync(binPath, 0o755); } catch (_) {}
     }
     fs.unlinkSync(binArchive);
-    console.log('✓ Piper 二进制已安装到', OUT);
+    const piperBinName = process.platform === 'win32' ? 'piper.exe' : 'piper';
+    console.log('✓ Piper 二进制已安装到', path.join(OUT, piperBinName));
 
     // 2) 中文模型（onnx + onnx.json）
     for (const vf of voiceFiles) {
