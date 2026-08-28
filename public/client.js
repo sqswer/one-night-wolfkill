@@ -984,10 +984,10 @@ function speakAnnounce(text, step, kind, stage, roleName) {
     if (kind === 'close') sendNightAck();
     return;
   }
-  // 语音开启：文字先展示（不依赖音频是否就绪），保证「文字不晚于语音」；
-  // 但「闭眼」回执(nightAck) 不放这里——交给音频真正结束（本地 onend 或服务端音频 ended）或 4.5s 兜底定时器，
+  // 语音开启：文字不要在这里展示——等 _ttsDrain 真正轮到本条朗读时再 showAnnItem，
+  // 保证「播报记录」和界面大字与语音/音频节奏一致，避免文本因 SSE 提前到达而抢跑。
+  // 「闭眼」回执(nightAck) 也不放这里，交给音频真正结束（本地 onend 或服务端音频 ended）或 4.5s 兜底定时器，
   // 避免本地无引擎的浏览器(via/小米)在还没听到时就推进夜晚。
-  showAnnItem(text, step, kind, stage, roleName);
   // 若尚未解锁，自动尝试一次解锁兜底：部分浏览器在用户未交互前会静默阻塞 speak。
   if (!_ttsUnlocked && !_ttsAutoUnlocking) {
     _ttsAutoUnlocking = true;
