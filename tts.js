@@ -109,14 +109,15 @@ function _runPiperOnce(text, useParams) {
     const args = ['--model', model];
     if (useParams) {
       const P = _piperParams();
+      // 注意：Piper 官方参数名是下划线（见 piper --help）
       args.push(
-        '--length-scale', String(P.lengthScale),
-        '--noise-scale', String(P.noiseScale),
-        '--noise-w', String(P.noiseW),
-        '--sentence-silence', String(P.sentenceSilence),
+        '--length_scale', String(P.lengthScale),
+        '--noise_scale', String(P.noiseScale),
+        '--noise_w', String(P.noiseW),
+        '--sentence_silence', String(P.sentenceSilence),
       );
     }
-    args.push('--output-file', tmp);
+    args.push('--output_file', tmp);
     try {
       cp = child_process.spawn(bin, args, { env, timeout: 30000 });
       if (cp.stderr) cp.stderr.on('data', d => errChunks.push(d));
@@ -138,13 +139,13 @@ function _runPiperOnce(text, useParams) {
   });
 }
 
-// 个别 Piper 版本的参数名是下划线（--length_scale）。若带调优参数被判为未知选项，
-// 自动回退到「仅 --model/--output-file」的基础调用，保证语音功能不因参数名差异而整体失效。
+// 兜底：若当前 Piper 版本不接受这些调优参数（报未知选项），自动回退到
+// 「仅 --model/--output_file」的基础调用，保证语音功能不因参数差异而整体失效。
 function _synthesizePiper(text) {
   return _runPiperOnce(text, true).catch(err => {
     const msg = err && err.message || '';
     if (/unrecogni[sz]ed|unknown|unmatched|invalid option|no such option/i.test(msg)) {
-      console.warn('[tts] Piper 不接受连字符形式的调优参数，回退基础参数重试：', msg.split('\n')[0]);
+      console.warn('[tts] Piper 不接受调优参数，回退基础参数重试：', msg.split('\n')[0]);
       return _runPiperOnce(text, false);
     }
     throw err;
