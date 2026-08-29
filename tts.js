@@ -90,7 +90,7 @@ function _runPiperOnce(text, useParams) {
     const model = _piperModel();
     const binDir = path.dirname(bin);
     // 必须先确保缓存目录存在，否则 Piper 写不进临时 wav 会直接失败
-    try { fs.mkdirSync(CACHE_DIR, { recursive: true }); } catch (_) {}
+    _ensureDirSync();
     const tmp = path.join(CACHE_DIR, 'piper_' + crypto.randomBytes(8).toString('hex') + '.wav');
     // 让 espeak-ng 找到随包的数据目录，并优先从二进制同目录加载 .so 依赖
     const env = Object.assign({}, process.env, {
@@ -171,23 +171,94 @@ function _cacheKey(text) {
   return crypto.createHash('sha1').update(text).digest('hex');
 }
 
-async function synthesize(text, voice) {
-  const key = _cacheKey(text);
-  const cp = path.join(CACHE_DIR, key + '.wav');
-  try {
-    const cached = await fs.promises.readFile(cp);
-    if (cached && cached.length) return cached;   // 命中缓存：跨局复用，不重复合成
-  } catch (_) { /* 缓存未命中 */ }
+// ---- 合成调度：全局串行 + 优先级 ----
+// 小容器（Bonto：0.06 核 / 512MB）上并发两个 Piper 既互相拖慢又有 OOM 风险，
+// 因此所有合成排成一条队列串行执行；玩家正在等的那一条（交互请求，prio 高）插队到
+// 预热任务（prio 低）之前，保证后台预热不会拖慢当前正在播的语音。
+const _synthQueue = [];      // { text, prio, seq, resolve, reject }
+let _synthRunning = false;
+let _synthSeq = 0;
+const _inflight = new Map(); // cacheKey -> Promise（同一文本的并发请求只真正合成一次）
 
+function _enqueueSynth(text, prio) {
+  return new Promise((resolve, reject) => {
+    const job = { text, prio, seq: _synthSeq++, resolve, reject };
+    // 跳过所有「优先级 >= 自己」的，插到第一个比自己低的之前：高优先级靠前，同级保持先来后到
+    let i = 0;
+    while (i < _synthQueue.length && _synthQueue[i].prio >= prio) i++;
+    _synthQueue.splice(i, 0, job);
+    _pumpSynth();
+  });
+}
+
+function _pumpSynth() {
+  if (_synthRunning) return;
+  const job = _synthQueue.shift();
+  if (!job) return;
+  _synthRunning = true;
+  _synthNow(job.text).then(job.resolve, job.reject).then(() => {
+    _synthRunning = false;
+    setTimeout(_pumpSynth, 0);
+  });
+}
+
+function _cachePath(key) { return path.join(CACHE_DIR, key + '.wav'); }
+
+// 缓存目录只需确保存在一次（每次合成都 mkdir 会白白多一次磁盘往返）
+let _dirChecked = false;
+function _ensureDirSync() {
+  if (_dirChecked) return;
+  try { fs.mkdirSync(CACHE_DIR, { recursive: true }); } catch (_) {}
+  try { _dirChecked = fs.statSync(CACHE_DIR).isDirectory(); } catch (_) { _dirChecked = false; }
+}
+
+async function _readCache(key) {
+  try {
+    const buf = await fs.promises.readFile(_cachePath(key));
+    return (buf && buf.length) ? buf : null;
+  } catch (_) { return null; }
+}
+
+async function _synthNow(text) {
   // 先做中文播报预处理（加停顿、补句末标点等），只影响送进 Piper 的文本，不改界面显示
-  const spoken = normalizeForTTS(text);
-  const audio = await _synthesizePiper(spoken);
-
+  const audio = await _synthesizePiper(normalizeForTTS(text));
   try {
-    await fs.promises.mkdir(CACHE_DIR, { recursive: true });
-    await fs.promises.writeFile(cp, audio);
+    await fs.promises.writeFile(_cachePath(_cacheKey(text)), audio);
   } catch (_) { /* 缓存写入失败不致命 */ }
   return audio;
 }
 
-module.exports = { synthesize, available, contentType, PROVIDER, normalizeForTTS };
+// prio：10 = 玩家正在等的那一条（默认）；0 = 后台预热。高优先级插队到低优先级之前。
+async function synthesize(text, voice, prio) {
+  const key = _cacheKey(text);
+  const cached = await _readCache(key);
+  if (cached) return cached;                      // 命中磁盘缓存：跨局复用，毫秒级返回
+  if (_inflight.has(key)) return _inflight.get(key);
+  const p = _enqueueSynth(text, prio == null ? 10 : prio);
+  const guarded = p.finally(() => { if (_inflight.get(key) === guarded) _inflight.delete(key); });
+  _inflight.set(key, guarded);
+  return guarded;
+}
+
+// 预热：把一局里将要播报的文本提前合成进缓存。串行、低优先级、已缓存的自动跳过（几乎零成本）。
+// 目的：把「现合成」从播报的关键路径上挪走——否则每条播报都要等 1~3 秒，夜里越往后越慢。
+async function warm(texts) {
+  if (!available() || !Array.isArray(texts)) return { ok: 0, total: 0 };
+  let ok = 0, total = 0;
+  for (const t of texts) {
+    const s = String(t == null ? '' : t).trim();
+    if (!s || s.length > 500) continue;
+    total++;
+    // prio=0：后台预热，玩家正在等的那一条可以随时插到它前面
+    try { await synthesize(s, undefined, 0); ok++; }
+    catch (e) { console.warn('[tts] 预热失败:', JSON.stringify(s.slice(0, 16)), e && e.message || e); }
+    // 每合成一条让出 20ms，给主流程（推进夜晚、响应请求）留出呼吸空间
+    await new Promise(r => setTimeout(r, 20));
+  }
+  return { ok, total };
+}
+
+// 队列深度（诊断用：>0 说明有合成在排队，播报间隔会被拉长）
+function pending() { return _synthQueue.length + (_synthRunning ? 1 : 0); }
+
+module.exports = { synthesize, warm, pending, available, contentType, PROVIDER, normalizeForTTS };
