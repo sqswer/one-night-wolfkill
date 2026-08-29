@@ -225,6 +225,11 @@ function announce(room, text, step, kind, stage, meta) {
 // 而是等待客户端确认该条已念完（nightAck）再进入下一位 / 进入白天，从而与语音/文字严格同步。
 // 兜底：超过 NIGHT_ACK_TIMEOUT 仍无确认（如全部客户端静音/出错/断线）则自动推进，避免夜晚卡死。
 const NIGHT_ACK_TIMEOUT = Number(process.env.NIGHT_ACK_TIMEOUT) || 8000;
+// 夜晚默认停顿（毫秒）：
+// - NIGHT_CLOSE_PAUSE：每个角色「闭眼」播报念完后，到下一位「睁眼」之间的固定停顿（规则要求 2000ms）
+// - NIGHT_REVEAL_PAUSE：无输入角色「睁眼」后，给玩家看清/听完私有信息的停留时间（有输入角色不合此停顿）
+const NIGHT_CLOSE_PAUSE = Number(process.env.NIGHT_CLOSE_PAUSE) || 2000;
+const NIGHT_REVEAL_PAUSE = Number(process.env.NIGHT_REVEAL_PAUSE) || 5000;
 function clearNightHold(room) {
   if (room.nightHoldTimer) { clearTimeout(room.nightHoldTimer); room.nightHoldTimer = null; }
   room.nightHold = null;
@@ -241,6 +246,12 @@ function holdNightAck(room, cb) {
     room.nightHold = null;
     try { cb(); } catch (e) { console.error('[night] 超时推进异常:', e && e.stack || e); safeAdvance(room, 'timeout'); }
   }, NIGHT_ACK_TIMEOUT);
+}
+// 闭眼后的标准推进：先等客户端确认「闭眼」已念完（与语音同步），再维持 NIGHT_CLOSE_PAUSE 停顿，才进入下一位
+function holdNightCloseThen(room, cb) {
+  holdNightAck(room, () => {
+    room.nightTimer = setTimeout(() => { room.nightTimer = null; cb(); }, NIGHT_CLOSE_PAUSE);
+  });
 }
 
 // 给单人推送私有信息（不公开）
@@ -627,19 +638,19 @@ function advanceQueue(room) {
       item.seats.forEach(seat => { if (reveal[seat]) sendPrivate(room, room.players[seat].token, reveal[seat]); });
     }
     pushState(room);
-    // 每个角色睁眼后停留 5 秒再闭眼，给玩家看清/听完播报的反应时间
-    const delay = 5000;
+    // 无输入角色（如爪牙确认狼人、守夜人确认同伴、失眠者确认身份）：睁眼后停留 NIGHT_REVEAL_PAUSE 让玩家看清/听完私有信息，再闭眼
+    const delay = NIGHT_REVEAL_PAUSE;
     room.nightTimer = setTimeout(() => closeAndAdvance(room, r), delay);
   }
 }
 
-// 信息类角色闭眼后推进：等待客户端确认「闭眼」播报已念完再进入下一位
+// 信息类角色闭眼后推进：先等客户端确认「闭眼」播报已念完，再停顿 NIGHT_CLOSE_PAUSE 后进入下一位
 function closeAndAdvance(room, r) {
   announce(room, `请【${r.name}】闭眼。`, room.qIndex + 1, 'close', room.queue[0].stage, { roleName: r.name });
   room.currentAction = null;
   pushState(room);
-  // 由客户端语音确认驱动：播完「闭眼」后服务端等待 nightAck 再推进，与语音严格同步
-  holdNightAck(room, () => advanceQueue(room));
+  // 与语音同步：播完「闭眼」后先等客户端确认念完，再维持默认 2000ms 停顿才进下一位
+  holdNightCloseThen(room, () => advanceQueue(room));
 }
 
 // 需要输入的角色（含机器人自动提交）执行完毕后闭眼并推进
@@ -647,9 +658,9 @@ function finishAutoAction(room, r) {
   applyAction(room, room.currentAction, room.currentAction.submissions);
   room.currentAction = null;
   pushState(room);
-  // 操作完成后立即闭眼（不再额外停留）；等待客户端确认「闭眼」播报已念完再进入下一位
+  // 操作完成后立即闭眼（无输入角色才有的 5000ms 阅读停顿不适用于此）；念完后停顿 2000ms 再进下一位
   announce(room, `请【${r.name}】闭眼。`, room.qIndex + 1, 'close', room.queue[0].stage, { roleName: r.name });
-  holdNightAck(room, () => advanceQueue(room));
+  holdNightCloseThen(room, () => advanceQueue(room));
 }
 
 function roleNeedsInput(role, room, seats) {
