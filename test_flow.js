@@ -52,6 +52,11 @@ const twoOthers = (players, self) => players.filter(p => p.seat !== self).map(p 
   let done = false;
 
   const clients = tokens.map((tk, idx) => sse(`/api/stream?code=${code}&token=${tk}`, async (ev, data) => {
+    // 夜晚推进由客户端回执驱动：播完某角色的「闭眼」后回 nightAck，服务端才进入下一位。
+    // 真实客户端是等语音播完才回，这里用 300ms 模拟。多个客户端都回也不会重复推进（服务端有置空保护）。
+    if (ev === 'speak' && data.kind === 'close') {
+      setTimeout(() => req('POST', '/api/action', { token: tk, type: 'nightAck', payload: {} }).catch(() => {}), 300);
+    }
     if (ev === 'hunter') { hunterSeat = data.seat; }
     if (ev === 'state') {
       states[tk] = data;
@@ -102,7 +107,8 @@ const twoOthers = (players, self) => players.filter(p => p.seat !== self).map(p 
 
   // 开始游戏
   await new Promise(r => setTimeout(r, 300));
-  const preset = process.argv[2] || 'M1';
+  // 默认用 3 人局阵容（6 张牌 = 3 玩家 + 3 中央）；换成 M1 等 5 人阵容必须同时把房间改成 5 人
+  const preset = process.argv[2] || 'S1';
   await req('POST', '/api/action', { token: hostToken, type: 'setPreset', payload: { presetId: preset } });
   await req('POST', '/api/action', { token: hostToken, type: 'start' });
   console.log('已发起开始，等待流程…');
