@@ -210,6 +210,11 @@ function publicLog(room, text) {
 }
 function announce(room, text, step, kind, stage, meta) {
   room.announce = text;
+  // 自检查：夜间/黄昏的播报若不在预热清单里，就得现合成，会明显拉长播报间隔。
+  // 上线后看日志里有没有这条 warn，即可确认预热是否覆盖了整晚脚本。
+  if (room.warmedTexts && (kind === 'open' || kind === 'close' || kind === 'stage') && !room.warmedTexts.has(text)) {
+    console.warn('[tts] 播报未预热（需现合成，间隔会变长）: ' + JSON.stringify(text.slice(0, 24)));
+  }
   const payload = { text, step: step || 0, kind: kind || null, stage: stage || null };
   if (meta) Object.assign(payload, meta);
   broadcast(room, 'speak', payload);
@@ -407,6 +412,53 @@ function fillBotActions(room) {
   }
 }
 
+// ---- 服务端语音预热 ----
+// 问题：Piper 现合成一条要 1~3 秒（小容器只有 0.06 核），而客户端是「轮到某条才去 /api/tts 要音频」，
+// 于是每条播报的间隔 = 合成 + 下载 + 播放；夜里越往后缓存命中率越低、容器内存压力越大，表现为越来越慢。
+// 对策：发牌后整晚脚本就已经确定了（牌堆固定 → 唤醒顺序固定 → 播报文本固定），
+// 开局即后台串行把这一局的播报全部合成进 tts-cache，客户端真正请求时基本都命中缓存（毫秒级）。
+// 预热走低优先级队列（见 tts.js），不会抢占玩家当前正在等的那一条。
+function nightScriptTexts(room) {
+  try {
+    const texts = ['游戏开始，请各位查看自己的身份。'];
+    const pick = (orderKey) => [...new Set(room.deck)]
+      .filter(rk => { const r = ROLES[rk]; return r && r.wake && r[orderKey] != null; })
+      .sort((a, b) => ROLES[a][orderKey] - ROLES[b][orderKey]);
+    const dusk = pick('duskOrder');
+    const night = pick('nightOrder');
+    // 是否进黄昏阶段，必须与 setupStage 的判定一致（看 duskAction，而不是看有没有黄昏角色），
+    // 否则会漏预热「天黑前，进入黄昏阶段。」这一条
+    const hasDusk = room.deck.some(k => ROLES[k] && ROLES[k].duskAction);
+    if (hasDusk) {
+      texts.push('天黑前，进入黄昏阶段。');
+      dusk.forEach(rk => {
+        const r = ROLES[rk];
+        texts.push(r.hint || `请【${r.name}】睁眼。`, `请【${r.name}】闭眼。`);
+      });
+    }
+    texts.push('天黑请闭眼。');
+    night.forEach(rk => {
+      const r = ROLES[rk];
+      texts.push(r.hint || `请【${r.name}】睁眼。`, `请【${r.name}】闭眼。`);
+    });
+    texts.push('天亮了，请睁眼。现在是白天发言阶段，请大家依次发言。');
+    texts.push('发言结束，现在开始投票。');
+    return texts;
+  } catch (_) { return []; }
+}
+
+function warmNightTts(room) {
+  if (!_tts || typeof _tts.warm !== 'function' || !_tts.available()) return;
+  if (process.env.TTS_WARM === '0') return;
+  const texts = nightScriptTexts(room);
+  if (!texts.length) return;
+  room.warmedTexts = new Set(texts);   // 供 announce() 自检「是否有漏预热的播报」
+  const t0 = Date.now();
+  _tts.warm(texts).then(r => {
+    console.log('[tts] 夜间脚本预热完成 ' + r.ok + '/' + r.total + ' 条，耗时 ' + (Date.now() - t0) + 'ms');
+  }).catch(e => console.warn('[tts] 预热异常:', e && e.message || e));
+}
+
 function startGame(room) {
   const n = room.players.length;
   if (n < 3 || n > 7) { return { error: '人数需为 3-7 人' }; }
@@ -440,6 +492,9 @@ function startGame(room) {
   room.log = [];
   room.announce = '';
   for (const p of room.players) p.ready = false;
+
+  // 牌堆已定 → 整晚播报脚本已定：立刻后台预热语音（不阻塞开局流程）
+  warmNightTts(room);
 
   // 先通知客户端重置播报历史与语音队列（务必在任意 announce 之前发出，
   // 否则开场播报「游戏开始/天黑/狼人/爪牙」会被客户端在 lobby→night 切换时误清）
@@ -1314,13 +1369,22 @@ const server = http.createServer((req, res) => {
     if (!text || text.length > 500) { res.writeHead(400); res.end('bad text'); return; }
     if (!_tts || !_tts.available()) { console.error('[tts] /api/tts 收到请求但 TTS 未启用(available=false)'); res.writeHead(501); res.end('TTS 未启用'); return; }
     const voice = (parsed.query.voice || '').toString() || undefined;
-    _tts.synthesize(text, voice).then(buf => {
-      console.log('[tts] 合成成功 len=' + (buf && buf.length) + ' text=' + JSON.stringify(text.slice(0, 20)));
+    // 命中磁盘缓存时会同步落到下面的 then，cache 标记用于排查「播报间隔变长」问题：
+    // X-TTS-Cache=miss 且 X-TTS-Ms 明显偏大 => 该条是现合成的，说明预热没覆盖到它
+    const t0 = Date.now();
+    let cachedHit = false;
+    const tap = (buf) => { cachedHit = (Date.now() - t0) < 60; return buf; };
+    _tts.synthesize(text, voice).then(tap).then(buf => {
+      const ms = Date.now() - t0;
+      console.log('[tts] len=' + (buf && buf.length) + ' ms=' + ms + (cachedHit ? ' cache=hit' : ' cache=miss') +
+        ' queue=' + (typeof _tts.pending === 'function' ? _tts.pending() : '?') + ' text=' + JSON.stringify(text.slice(0, 20)));
       res.writeHead(200, {
         'Content-Type': _tts.contentType(),
         'Content-Length': buf.length,
         'Cache-Control': 'public, max-age=86400',
-        'X-Accel-Buffering': 'no'
+        'X-Accel-Buffering': 'no',
+        'X-TTS-Ms': String(ms),
+        'X-TTS-Cache': cachedHit ? 'hit' : 'miss',
       });
       res.end(buf);
     }).catch(e => { console.error('[tts] 合成失败:', e && e.stack || e); res.writeHead(502); res.end('TTS 失败: ' + (e && e.message || e)); });
