@@ -150,10 +150,14 @@ function connectSSE() {
   });
   es.addEventListener('speech', (e) => { addSpeech(JSON.parse(e.data)); });
   es.addEventListener('hunter', (e) => { const d = JSON.parse(e.data); toast(`猎人 ${d.name} 被放逐，可开枪`); });
-  es.addEventListener('voice', (e) => { onVoiceState((JSON.parse(e.data).seats) || []); });
+  es.addEventListener('voice', (e) => { const d = JSON.parse(e.data); onVoiceState((d.seats) || []); });
   es.addEventListener('voice_invite', (e) => {
     const d = JSON.parse(e.data);
-    if (!voiceOn) showVoiceInvite(d.fromName);
+    if (voiceOn) return;
+    const key = d.fromSeat + ':' + (d.at || 0);
+    if (key === voiceInviteShownKey) return;   // 同一条邀请只弹一次（防止每次 state 都弹）
+    voiceInviteShownKey = key;
+    showVoiceInvite(d.fromName);
   });
   es.addEventListener('signal', (e) => { const d = JSON.parse(e.data); onVoiceSignal(d.from, d.data); });
 }
@@ -167,6 +171,8 @@ const PHASE_NAME = {
 let _lastPhase = null;
 function onState(s) {
   STATE.data = s;
+  // 语音邀请以服务端持久状态为准同步：断线重连/切后台回来后仍能收到邀请
+  try { voiceSyncInvite(); } catch (_) {}
   voiceApplyPhase(s.phase);
   // 注：播报历史与语音队列的清空改由服务端 startGame 时发的 `reset` 事件负责，
   // 不能在 lobby→night 的 state 里清，否则会把「游戏开始/天黑/狼人/爪牙」等开场播报一起删掉。
@@ -1265,34 +1271,83 @@ $('#btn-tts').onclick = () => {
 // --------------------------- 房间实时语音（WebRTC Mesh） ---------------------------
 // 信令经服务器 SSE 转发（voice / signal / voice_invite 事件），音频流走浏览器 P2P，不经过服务器。
 // 约定：座位号小的一方作为发起方（创建 offer），避免双方同时 offer 冲突。
-const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+//
+// 2026-08 语音升级，针对三个线上问题：
+// ① 单向无声（只有一侧听得到）——远端 <audio> 被浏览器自动播放策略拦截后 catch 掉就再无重试；
+//    改为「手势重试 + 提示点击屏幕恢复」，并保证本地音轨一定挂到每个 PeerConnection。
+// ② 通话请求时有时无——邀请原本是 fire-and-forget 广播，SSE 断连那一瞬就永久丢失；
+//    改为服务端持久化的邀请（state.voiceInvite），断线重连/切后台后仍能收到。
+// ③ 双机靠近时刺耳啸叫——拉森效应（声学回授环路）。核心是**关掉 AGC**：AGC 会在回授环路里
+//    持续抬高增益导致啸叫；保留 AEC 消除回声。再叠加播放音量上限 + 建连淡入消除爆音 +
+//    可选半双工闪避（本机说话时压低对方音量，把环路增益压到 1 以下）。
+let ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+let voiceIceLoaded = false;   // 是否已从服务端拉取过 ICE 配置（含可选 TURN）
+
+// 音频采集约束：AGC 必须关闭（啸叫主因），AEC 必须开启（消除回声），单声道降低回授与带宽
+const VOICE_AUDIO_CONSTRAINTS = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: false,   // 关键：AGC 在声学回授环路中会不断抬增益 → 刺耳啸叫
+  channelCount: 1,
+};
+const VOICE_VOLUME = 0.8;          // 远端播放音量上限（压低回授环路增益）
+const VOICE_FADE_MS = 500;         // 建连淡入时长：消除连接瞬间的爆音/刺耳噪声
+const VOICE_DUCK_LEVEL = 0.35;     // 半双工闪避：本机说话时远端音量压到 VOICE_VOLUME × 0.35
+const VOICE_CONNECT_TIMEOUT = 8000;// 连接看门狗：超时未连上则重建（解决"有时连不通"）
+const VOICE_MAX_RETRY = 3;         // 单个对端最大重建次数
+
 let voiceOn = false;          // 本地麦克风是否已加入通话
 let localStream = null;       // 本地麦克风流
-let voicePeers = new Map();   // seat -> { pc, audio, pendingCandidates }
+let voicePeers = new Map();   // seat -> { pc, audio, pendingCandidates, watchdog, fadeTimer, ducked }
 let voiceNightMuted = false;  // 夜晚/黄昏自动静音
 let voiceLastSeats = [];      // 最近一次收到的通话成员列表，用于断线后重连
 let voicePendingOffers = [];  // localStream 未就绪时暂存的 offer
 let voiceInviteTimer = null;  // 邀请弹窗自动关闭计时器
+let voiceAudioBlocked = false;// 远端播放是否被浏览器自动播放策略拦截
+let voiceAntiHowl = true;     // 防啸叫（半双工闪避）开关
+let voiceDuckCtx = null;      // { ctx, source, analyser, buf } 本机说话检测
+let voiceDuckTimer = null;
+let voiceSpeakingHold = 0;    // 本机说话保持计数（>0 视为正在说话）
+let voiceDucked = false;
+const voiceRetries = new Map();   // seat -> 该对端已重建次数
+
+// 建连前从服务端拉一次 ICE 配置（默认 STUN；服务端配了 TURN_URL 环境变量就自动带上 TURN）
+async function voiceLoadIce() {
+  if (voiceIceLoaded) return;
+  try {
+    const r = await fetch('/api/ice');
+    if (!r.ok) return;
+    const j = await r.json();
+    if (j && Array.isArray(j.iceServers) && j.iceServers.length) {
+      ICE_SERVERS = j.iceServers;
+      voiceIceLoaded = true;
+    }
+  } catch (_) {}
+}
 
 function voiceSend(subtype, extra) {
-  api('/api/action', { token: STATE.token, type: 'voice', payload: Object.assign({ subtype }, extra || {}) });
+  return api('/api/action', { token: STATE.token, type: 'voice', payload: Object.assign({ subtype }, extra || {}) })
+    .catch(() => {});   // 信令发送失败不阻塞 UI；邀请另有服务端状态兜底
 }
 
 function voiceMakePeer(seat) {
   if (!window.RTCPeerConnection) return null;
-  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS, iceCandidatePoolSize: 2 });
   const audio = document.createElement('audio');
   audio.autoplay = true; audio.playsInline = true; audio.muted = false;
+  audio.volume = 0;                 // 从 0 起步，由淡入升到 VOICE_VOLUME，消除建连瞬间的爆音
   audio.dataset.peer = seat;
   document.body.appendChild(audio); // 必须挂到 DOM：移动端/部分浏览器对未挂载的音频元素不会出声
-  const peer = { pc, audio, pendingCandidates: [] };
+  const peer = { pc, audio, pendingCandidates: [], watchdog: null, fadeTimer: null, ducked: false };
+  // 本地音轨必须在建连时就加入，否则对端听不到本端（单向无声）
   if (localStream) localStream.getAudioTracks().forEach(t => pc.addTrack(t, localStream));
   pc.onicecandidate = (e) => { if (e.candidate) voiceSend('signal', { to: seat, data: { candidate: e.candidate } }); };
   pc.ontrack = (e) => {
     let stream = (e.streams && e.streams[0]) || null;
     if (!stream) { stream = new MediaStream(); stream.addTrack(e.track); } // 兜底：某些浏览器 streams 为空，用裸 track 组装
     audio.srcObject = stream;
-    audio.play().catch(() => {});
+    voiceFadeIn(peer);      // 淡入：避免建连瞬间满音量冲击造成的刺耳噪声
+    voicePlayRemote(peer);  // 自动播放策略防护：被拦截时挂手势重试
   };
   // 稳定性：ICE 失败时自动重启候选协商；连接彻底断开后尝试重连
   pc.oniceconnectionstatechange = () => {
@@ -1301,7 +1356,11 @@ function voiceMakePeer(seat) {
     }
   };
   pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+    if (pc.connectionState === 'connected') {
+      try { clearTimeout(peer.watchdog); } catch (_) {}
+      peer.watchdog = null;
+      voiceRetries.delete(seat);
+    } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
       if (voiceOn) {
         // 延迟重连：让两端都进入干净状态后再重新发起
         setTimeout(() => { voiceClosePeer(seat); onVoiceState(voiceLastSeats); }, 600);
@@ -1313,9 +1372,47 @@ function voiceMakePeer(seat) {
   return peer;
 }
 
+// ---- 远端播放：音量控制 + 淡入（全部走原生 <audio>，不用 Web Audio 接管，
+//      以保证浏览器的 AEC 能拿到正确的参考信号，移动端音频路由也正常）----
+function voiceTargetVolume(peer) {
+  return (voiceAntiHowl && peer.ducked) ? VOICE_VOLUME * VOICE_DUCK_LEVEL : VOICE_VOLUME;
+}
+function voiceRampTo(peer, target, ms) {
+  if (peer.fadeTimer) { clearInterval(peer.fadeTimer); peer.fadeTimer = null; }
+  const from = peer.audio.volume;
+  const start = performance.now();
+  peer.fadeTimer = setInterval(() => {
+    const t = Math.min(1, (performance.now() - start) / ms);
+    peer.audio.volume = Math.max(0, Math.min(1, from + (target - from) * t));
+    if (t >= 1) { clearInterval(peer.fadeTimer); peer.fadeTimer = null; }
+  }, 30);
+}
+function voiceFadeIn(peer) { voiceRampTo(peer, voiceTargetVolume(peer), VOICE_FADE_MS); }
+
+// ---- 自动播放策略防护（修复"只有一侧能听到"）----
+// 移动端/iOS 常在 ontrack 触发时已脱离用户手势栈，play() 被拒；旧代码直接 catch 掉就再无补救。
+function voicePlayRemote(peer) {
+  const p = peer.audio.play();
+  if (p && p.catch) p.catch(() => voiceMarkBlocked());
+}
+function voiceMarkBlocked() {
+  if (voiceAudioBlocked) return;
+  voiceAudioBlocked = true;
+  toast('🔊 浏览器拦截了语音播放，点击屏幕任意位置即可听到队友');
+  const retry = () => {
+    document.removeEventListener('click', retry);
+    document.removeEventListener('touchstart', retry);
+    voiceAudioBlocked = false;
+    for (const peer of voicePeers.values()) voicePlayRemote(peer);
+  };
+  document.addEventListener('click', retry, { once: true });
+  document.addEventListener('touchstart', retry, { once: true, passive: true });
+}
+
 // 本地（座位号更小者）主动发起连接
 async function voiceInitiate(seat) {
   if (voicePeers.has(seat)) return;
+  if (!localStream) return;               // 麦克风未就绪不建连，避免生成"无音轨"的 peer（单向无声）
   const peer = voiceMakePeer(seat);
   if (!peer) { toast('当前浏览器不支持 WebRTC 实时语音'); return; }
   voicePeers.set(seat, peer);
@@ -1323,7 +1420,24 @@ async function voiceInitiate(seat) {
     const offer = await peer.pc.createOffer();
     await peer.pc.setLocalDescription(offer);
     voiceSend('signal', { to: seat, data: { desc: peer.pc.localDescription } });
-  } catch (_) { voiceClosePeer(seat); }
+  } catch (_) { voiceClosePeer(seat); return; }
+  // 连接看门狗：超时仍未连上就重建，解决"有时连得上有时连不上"（NAT/ICE 抖动）
+  peer.watchdog = setTimeout(() => voiceWatchdogFire(seat), VOICE_CONNECT_TIMEOUT);
+}
+function voiceWatchdogFire(seat) {
+  const peer = voicePeers.get(seat);
+  if (!peer || !voiceOn) return;
+  if (peer.pc.connectionState === 'connected') { peer.watchdog = null; return; }
+  const tries = (voiceRetries.get(seat) || 0) + 1;
+  if (tries > VOICE_MAX_RETRY) {
+    voiceRetries.delete(seat);
+    voiceClosePeer(seat);
+    toast('语音连接建立失败：对方网络可能受限（复杂 NAT 需为服务端配置 TURN）');
+    return;
+  }
+  voiceRetries.set(seat, tries);
+  voiceClosePeer(seat);
+  setTimeout(() => { if (voiceOn && !voicePeers.has(seat)) voiceInitiate(seat); }, 600 * tries);
 }
 
 async function onVoiceSignal(from, data) {
@@ -1363,6 +1477,8 @@ function flushVoicePendingOffers() {
 function voiceClosePeer(seat) {
   const peer = voicePeers.get(seat);
   if (peer) {
+    try { clearTimeout(peer.watchdog); } catch (_) {}
+    try { clearInterval(peer.fadeTimer); } catch (_) {}
     try { peer.pc.close(); } catch (_) {}
     try { peer.audio.srcObject = null; peer.audio.remove(); } catch (_) {}
     voicePeers.delete(seat);
@@ -1371,6 +1487,8 @@ function voiceClosePeer(seat) {
 
 function voiceTeardown() {
   for (const seat of [...voicePeers.keys()]) voiceClosePeer(seat);
+  voiceRetries.clear();
+  voiceStopDucking();
   if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
   voiceOn = false; voiceNightMuted = false;
   voiceLastSeats = [];
@@ -1383,12 +1501,59 @@ function onVoiceState(seats) {
   const mySeat = STATE.seat;
   const other = voiceLastSeats.filter(s => s !== mySeat);
   for (const seat of [...voicePeers.keys()]) {
-    if (!other.includes(seat)) voiceClosePeer(seat);
+    if (!other.includes(seat)) { voiceRetries.delete(seat); voiceClosePeer(seat); }
   }
   renderVoice(other);
   if (!voiceOn) return;
   for (const seat of other) {
     if (!voicePeers.has(seat) && mySeat < seat) voiceInitiate(seat);
+  }
+}
+
+// ---- 防啸叫：半双工闪避（本机说话时压低对方音量，把声学回授环路增益压到 1 以下）----
+// 只做电平检测，不接 destination，绝不把本机音频播出去（否则会自己给自己制造回授）。
+function voiceStartDucking() {
+  voiceStopDucking();
+  if (!voiceAntiHowl || !localStream) return;
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    const ctx = new AC();
+    const source = ctx.createMediaStreamSource(localStream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    source.connect(analyser);
+    voiceDuckCtx = { ctx, source, analyser, buf: new Uint8Array(analyser.fftSize) };
+    voiceDuckTimer = setInterval(voicePollLevel, 80);
+  } catch (_) {}
+}
+function voiceStopDucking() {
+  if (voiceDuckTimer) { clearInterval(voiceDuckTimer); voiceDuckTimer = null; }
+  if (voiceDuckCtx) {
+    try { voiceDuckCtx.source.disconnect(); } catch (_) {}
+    try { voiceDuckCtx.ctx.close(); } catch (_) {}
+    voiceDuckCtx = null;
+  }
+  voiceSpeakingHold = 0;
+  voiceSetDucked(false);
+}
+function voicePollLevel() {
+  if (!voiceDuckCtx || !localStream) return;
+  const { analyser, buf } = voiceDuckCtx;
+  analyser.getByteTimeDomainData(buf);
+  let sum = 0;
+  for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; sum += v * v; }
+  const rms = Math.sqrt(sum / buf.length);
+  if (rms > 0.045 && !voiceNightMuted) voiceSpeakingHold = 6;   // 约 480ms 保持，避免断续呼吸感
+  else if (voiceSpeakingHold > 0) voiceSpeakingHold--;
+  voiceSetDucked(voiceSpeakingHold > 0);
+}
+function voiceSetDucked(on) {
+  if (voiceDucked === on) return;
+  voiceDucked = on;
+  for (const peer of voicePeers.values()) {
+    peer.ducked = on;
+    voiceRampTo(peer, voiceTargetVolume(peer), 120);   // 平滑过渡，避免压音时爆音
   }
 }
 
@@ -1401,6 +1566,7 @@ function voiceApplyPhase(phase) {
 }
 
 // 语音通话邀请弹窗
+let voiceInviteShownKey = '';   // 已弹过的邀请（座位+时间戳）：避免同一条邀请被反复弹窗
 function showVoiceInvite(name) {
   const modal = $('#voice-invite-modal');
   const text = $('#voice-invite-text');
@@ -1415,6 +1581,17 @@ function hideVoiceInvite() {
   if (modal) modal.classList.add('hidden');
   clearTimeout(voiceInviteTimer); voiceInviteTimer = null;
 }
+// 以服务端持久状态为准同步邀请弹窗：断线重连、切后台回来后依然能收到邀请
+// ——修复「有时能收到通话请求，有时收不到」。
+function voiceSyncInvite() {
+  const inv = STATE.data && STATE.data.voiceInvite;
+  if (!inv) { voiceInviteShownKey = ''; hideVoiceInvite(); return; }
+  if (voiceOn) return;
+  const key = inv.fromSeat + ':' + (inv.at || 0);
+  if (key === voiceInviteShownKey) return;   // 同一条邀请不再重复弹
+  voiceInviteShownKey = key;
+  showVoiceInvite(inv.fromName);
+}
 
 async function toggleVoice() {
   if (voiceOn) {
@@ -1425,8 +1602,13 @@ async function toggleVoice() {
   }
   if (!window.RTCPeerConnection) { toast('当前浏览器不支持 WebRTC，请换用 Chrome / Edge'); return; }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('无法访问麦克风（需 HTTPS 或 localhost）'); return; }
+  // 建连前拉取 ICE 配置（服务端配了 TURN_URL 就会带上 TURN，复杂 NAT 下才能连上）
+  await voiceLoadIce();
   try {
-    localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    // AGC 必须关闭：两台手机靠近时，AGC 会在声学回授环路里持续抬增益 → 刺耳啸叫
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: VOICE_AUDIO_CONSTRAINTS });
+    // 部分平台会忽略 getUserMedia 的约束，拿到轨道后再强制应用一次
+    localStream.getAudioTracks().forEach(t => { try { t.applyConstraints(VOICE_AUDIO_CONSTRAINTS); } catch (_) {} });
   } catch (err) {
     localStream = null;
     toast('麦克风权限被拒绝：' + (err && (err.name || err.message) || '无法访问'));
@@ -1436,9 +1618,9 @@ async function toggleVoice() {
   flushVoicePendingOffers();
   voiceOn = true;
   renderVoice();
-  voiceSend('join');
-  // 一方发起后，向房间内其他玩家弹出加入邀请
-  voiceSend('invite');
+  voiceStartDucking();          // 本机说话检测（防啸叫闪避）
+  await voiceSend('join');      // 先加入（服务端据此清除本玩家的待处理邀请），顺序确定
+  voiceSend('invite');          // 再邀请房间内其他玩家
   toast('已加入语音通话，已向其他玩家发送邀请');
 }
 
@@ -1459,11 +1641,33 @@ function renderVoice(members) {
   if (names.length) txt += '、' + names.join('、');
   else txt += '（等待他人加入）';
   if (voiceNightMuted) txt += ' · 🔇 夜晚已静音';
+  if (voiceAudioBlocked) txt += ' · 🔇 点击屏幕恢复收听';
   $('#voice-bar-status').textContent = txt;
+  renderAntiHowlBtn();
+}
+function renderAntiHowlBtn() {
+  const b = $('#btn-antihowl');
+  if (!b) return;
+  b.classList.toggle('on', voiceAntiHowl);
+  b.textContent = voiceAntiHowl ? '🛡️ 防啸叫：开' : '🛡️ 防啸叫：关';
+  b.title = voiceAntiHowl
+    ? '防啸叫已开启：你说话时会自动压低对方音量，避免两台手机靠近时的刺耳啸叫'
+    : '防啸叫已关闭：全双工模式，戴耳机时建议关闭';
 }
 $$('.voice-toggle').forEach(b => b.onclick = toggleVoice);
 $('#voice-invite-accept').onclick = () => { hideVoiceInvite(); toggleVoice(); };
-$('#voice-invite-decline').onclick = () => { hideVoiceInvite(); };
+// 忽略：显式通知服务端清除该邀请，避免服务端状态里一直挂着导致反复弹窗
+$('#voice-invite-decline').onclick = () => { hideVoiceInvite(); voiceSend('decline'); };
+// 防啸叫开关（旧版 HTML 缓存里没有该按钮时静默跳过，不阻断脚本）
+{
+  const _antiHowlBtn = $('#btn-antihowl');
+  if (_antiHowlBtn) _antiHowlBtn.onclick = () => {
+    voiceAntiHowl = !voiceAntiHowl;
+    if (voiceAntiHowl) voiceStartDucking(); else voiceStopDucking();
+    renderAntiHowlBtn();
+    toast(voiceAntiHowl ? '已开启防啸叫：你说话时自动压低对方音量' : '已关闭防啸叫：全双工模式（戴耳机更推荐）');
+  };
+}
 
 // --------------------------- 角色图鉴 ---------------------------
 const CODEX_TEAMS = [

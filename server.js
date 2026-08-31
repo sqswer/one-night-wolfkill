@@ -193,6 +193,7 @@ function makeRoom(hostName, capacity = 5) {
     result: null,
     sse: [],                // {token, res}
     voice: new Set(),      // 开启语音的玩家 token 集合（WebRTC mesh 信令由服务器转发，音频走 P2P 不经过服务器）
+    voiceInvites: {},      // token -> {fromSeat, fromName, at}：待处理的语音邀请（有状态，重连/刷新后仍可收到）
   };
   rooms.set(code, room);
   return room;
@@ -300,6 +301,48 @@ function voiceSeats(room) {
 }
 function seatToToken(room, seat) { const p = room.players.find(x => x.seat === seat); return p ? p.token : null; }
 
+// ---- 语音邀请：有状态（持久化到房间），不再是一次性广播 ----
+// 旧实现里 invite 只是「fire-and-forget」地往 SSE 推一条事件：目标客户端当时若正在重连/切后台，
+// 邀请就永久丢失，表现为「有时能收到通话请求，有时收不到」。
+// 改为房间内持久状态 + 随 state 推送，客户端每次收到 state 都能发现待处理邀请，断线重连后依然可见。
+const VOICE_INVITE_TTL = Number(process.env.VOICE_INVITE_TTL) || 180000; // 邀请有效期（毫秒）
+function voiceInviteFor(room, token) {
+  const inv = room.voiceInvites && room.voiceInvites[token];
+  if (!inv) return null;
+  if (Date.now() - inv.at > VOICE_INVITE_TTL) { delete room.voiceInvites[token]; return null; }
+  return inv;
+}
+function clearVoiceInvite(room, token) { if (room.voiceInvites) delete room.voiceInvites[token]; }
+function voiceInvitedSeats(room) {
+  const out = [];
+  for (const t of Object.keys(room.voiceInvites || {})) {
+    if (!voiceInviteFor(room, t)) continue;      // 顺带清理过期项
+    const pl = findPlayer(room, t); if (pl) out.push(pl.seat);
+  }
+  return out;
+}
+
+// ---- ICE 服务器配置（默认仅 STUN；复杂 NAT 下可通过环境变量加 TURN，无需改代码）----
+// 用法：在 Bonto 环境变量里配 TURN_URL / TURN_USERNAME / TURN_CREDENTIAL（多个用逗号分隔）。
+// 只有 STUN 时，对称 NAT / 多层路由下的手机可能 P2P 连不通（表现为"有时连得上有时连不上"）。
+function iceConfig() {
+  const servers = [];
+  const stun = (process.env.STUN_URL || 'stun:stun.l.google.com:19302')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  if (stun.length) servers.push({ urls: stun });
+  const turn = (process.env.TURN_URL || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (turn.length) {
+    const username = process.env.TURN_USERNAME || '';
+    const credential = process.env.TURN_CREDENTIAL || '';
+    servers.push({ urls: turn, username, credential });
+  }
+  return { iceServers: servers };
+}
+// 广播语音成员 + 被邀请座位（客户端据此同步通话成员与待处理邀请）
+function voiceBroadcast(room) {
+  broadcast(room, 'voice', { seats: voiceSeats(room), invited: voiceInvitedSeats(room) });
+}
+
 // 推送个性化状态给每位玩家
 function pushState(room) {
   for (const c of room.sse) {
@@ -368,6 +411,9 @@ function buildState(room, player) {
     protectTarget: (room.phase === 'vote' && room.currentAction && room.currentAction.role === 'bodyguard' && room.currentAction.seats.includes(player.seat)) ? true : false,
     hunterShoot: (room.phase === 'result_pending_hunter' && room.hunterPending === player.seat) || false,
     nightInfo: null,
+    // 语音：当前通话成员 + 本玩家待处理的邀请（有状态，重连后依然可见）
+    voiceSeats: voiceSeats(room),
+    voiceInvite: voiceInviteFor(room, player.token),
   };
   // 夜晚/黄昏唤醒进度（供前端"AI 引导进度条"使用）
   if ((room.phase === 'dusk' || room.phase === 'night') && room.queue.length) {
@@ -1400,6 +1446,11 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // 客户端建连前拉取 ICE 配置（默认 STUN；配了 TURN_URL 环境变量则自动带上 TURN）
+  if (req.method === 'GET' && pathname === '/api/ice') {
+    return sendJSON(res, iceConfig());
+  }
+
   if (req.method === 'GET' && pathname === '/api/tts') {
     const text = (parsed.query.text || '').toString();
     if (!text || text.length > 500) { res.writeHead(400); res.end('bad text'); return; }
@@ -1550,13 +1601,28 @@ const server = http.createServer((req, res) => {
         case 'ping': break;
       case 'voice': {
         const sub = payload && payload.subtype;
-        if (sub === 'join') { room.voice.add(token); broadcast(room, 'voice', { seats: voiceSeats(room) }); }
-        else if (sub === 'leave') { room.voice.delete(token); broadcast(room, 'voice', { seats: voiceSeats(room) }); }
-        else if (sub === 'invite') {
-          // 发起者邀请房间内其他玩家加入语音通话
-          const payloadStr = `event: voice_invite\ndata: ${JSON.stringify({ fromSeat: p.seat, fromName: p.name })}\n\n`;
-          for (const c of room.sse) { if (c.token !== token) try { c.res.write(payloadStr); } catch (_) {} }
+        if (sub === 'join') {
+          room.voice.add(token);
+          clearVoiceInvite(room, token);          // 已加入 → 邀请失效
+          voiceBroadcast(room);
+          pushState(room);                        // 同步 state.voiceSeats / voiceInvite，避免状态陈旧
         }
+        else if (sub === 'leave') { room.voice.delete(token); voiceBroadcast(room); pushState(room); }
+        else if (sub === 'invite') {
+          // 发起者邀请房间内其他玩家加入语音通话。
+          // 双通道投递：①立即推 voice_invite 事件（低延迟）；②写入房间持久状态并 pushState，
+          // 这样目标客户端当时若正在重连/切后台，之后收到任意 state 仍能发现待处理邀请
+          // ——修复「有时能收到通话请求，有时收不到」。
+          for (const other of room.players) {
+            if (other.token === token || other.bot) continue;   // 不邀请自己 / 机器人
+            if (room.voice.has(other.token)) continue;          // 已在通话中
+            const at = Date.now();
+            room.voiceInvites[other.token] = { fromSeat: p.seat, fromName: p.name, at };
+            pushTo(room, other.token, 'voice_invite', { fromSeat: p.seat, fromName: p.name, at });
+          }
+          pushState(room);
+        }
+        else if (sub === 'decline') { clearVoiceInvite(room, token); pushState(room); }
         else if (sub === 'signal') { const to = seatToToken(room, payload.to); if (to && to !== token) pushTo(room, to, 'signal', { from: p.seat, data: payload.data }); }
         break;
       }
