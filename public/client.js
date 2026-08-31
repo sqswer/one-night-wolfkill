@@ -879,6 +879,7 @@ let _ttsSeq = 0;                 // 朗读序列号：cancel() 触发的旧 onen
 let _serverTtsFails = 0;         // 服务端 TTS 连续失败次数（单次失败不永久禁用，避免偶发网络/解码抖动导致整局无语音）
 let _serverTtsWarned = false;    // 服务端 TTS 不可用提示是否已弹过
 let _serverAudioEl = null;       // 当前正在播放的服务端语音 <audio> 实例（供 stopAnnounce 停止）
+let _serverAudioSeq = 0;         // 服务端语音序列号：上一条音频迟到的 onended/error 不会误关/误推进当前这条
 let _audioUnlocked = false;      // 移动端 WebView 自动播放策略：是否已在用户手势中预热解锁
 
 // ---- 服务端语音预取 ----
@@ -1166,15 +1167,17 @@ function _speakServer(text, fallback) {
   // 命中预取缓存时直接用本地 Blob 地址，省掉一次网络往返
   const prefetched = _ttsAudioCache.get(text) || null;
   const u = prefetched || ('/api/tts?text=' + encodeURIComponent(text));
-  let done = false;
   if (!_serverAudioEl) { _serverAudioEl = new Audio(); _serverAudioEl.preload = 'auto'; }
   const el = _serverAudioEl;
+  const mySeq = ++_serverAudioSeq;   // 当前这条的序号：上一条迟到的 onended/error 会被屏蔽，不会误关/误推进
   const dbg = (...a) => { if (_ttsDebug) console.log('[tts-debug]', ...a); };
   dbg('start', JSON.stringify(text.slice(0, 16)), prefetched ? 'from-prefetch' : 'from-network', 'unlocked=' + _audioUnlocked);
   // 本条开始播放的同时预取下一条，让下一条无需等待网络/合成
   _ttsPrefetchNext();
+  let done = false;
   const finish = (ok, reason) => {
-    if (done) return; done = true;        // 一次性守卫：ended/error/play被拒 仅触发一次推进
+    if (mySeq !== _serverAudioSeq) return;   // 已被新一条取代
+    if (done) return; done = true;           // 一次性守卫：ended/error/play被拒 仅触发一次推进
     el.onended = el.onerror = null;
     if (ok) { _serverTtsFails = 0; dbg('ended ok'); _afterUtterance(); return; }
     _serverTtsFails++;
@@ -1184,32 +1187,37 @@ function _speakServer(text, fallback) {
       _serverTtsWarned = true;
       toast('服务端语音连续失败，已改为文字显示。建议检查 Bonto 服务端 Piper TTS。');
     }
-    _afterUtterance();
+    _afterUtterance();   // 失败也继续推进，绝不让队列卡死、也不让单条无声拖垮整桌节奏
   };
-  el.onended = () => finish(true);
+  el.onended = () => { if (mySeq === _serverAudioSeq) finish(true); };
   el.onerror = () => {
     // MediaError.code: 1=ABORTED 2=NETWORK 3=DECODE 4=SRC_NOT_SUPPORTED
+    if (mySeq !== _serverAudioSeq) return;
     const code = el.error && el.error.code;
     finish(false, 'audio.error code=' + code);
   };
   // 取消上一条可能残留的加载/播放，避免串台
   try { el.pause(); } catch (_) {}
   el.src = u;
-  const tryPlay = (depth) => {
+  let tries = 0;
+  const tryPlay = () => {
+    if (mySeq !== _serverAudioSeq) return;
     const p = el.play();
     if (!p || !p.catch) return; // 老浏览器无 promise：靠 onended/onerror
     p.catch((e) => {
-      dbg('play rejected', e && e.name || e, 'depth=' + depth);
-      if (depth < 1) { try { tryPlay(depth + 1); } catch (_) { finish(false, 'play rejected twice'); } return; }
-      // 已重试仍被拒：若尚未解锁，则等待下一次用户手势时再播本条（不立即推进文本）
+      tries++;
+      dbg('play rejected', e && e.name || e, 'tries=' + tries);
+      if (tries < 3) { setTimeout(tryPlay, 200 * tries); return; }   // 退避重试，规避偶发自动播放拒绝
+      // 仍被拒：若尚未解锁，挂到下一次用户手势再播本条（不立即推进文本），但最多等 2s，超时则降级文字推进
       if (!_audioUnlocked) {
+        _unlockAudio();
         const onTouch = () => { document.removeEventListener('touchstart', onTouch); document.removeEventListener('click', onTouch); _unlockAudio(); tryPlay(0); };
         document.addEventListener('touchstart', onTouch, { once: true, passive: true });
         document.addEventListener('click', onTouch, { once: true });
-        // 仍未解锁期间：本条文本先不推进，等手势触发真正出声后再推进，避免文本抢跑
+        setTimeout(() => { if (mySeq === _serverAudioSeq) finish(false, 'unlock timeout'); }, 2000);
         return;
       }
-      finish(false, 'play rejected twice');
+      finish(false, 'play rejected');
     });
   };
   tryPlay(0);

@@ -241,11 +241,35 @@ function safeAdvance(room, label) {
 }
 function holdNightAck(room, cb) {
   clearNightHold(room);
-  room.nightHold = cb;
+  // 期望回执集合 = 当前所有建立了 SSE 连接的真人客户端（机器人无浏览器连接，自然排除）。
+  // 服务端必须等「最慢的那位」也确认本条「闭眼」已念完，才进入下一位 / 进入白天——
+  // 这样多人同房时每位玩家的文本+语音都严格对齐，不会出现「一方已播到强盗、另一方还停在狼人」的错位。
+  // 旧逻辑只等「最快的那一位」回执就推进，是多人不同步的根因。
+  const expected = new Set();
+  for (const c of room.sse) if (c.token) expected.add(c.token);
+  if (expected.size === 0) {              // 无人在线（纯机器人 / 无头测试无连接）：无需等待，直接推进
+    try { cb(); } catch (e) { console.error('[night] 推进异常:', e && e.stack || e); safeAdvance(room, 'noop'); }
+    return;
+  }
+  if (expected.size > 1) console.log('[night] 等待 ' + expected.size + ' 位在线玩家确认本条播报完成');
+  room.nightHold = { cb, expected, acks: new Set() };
   room.nightHoldTimer = setTimeout(() => {
+    console.warn('[night] 超时兜底推进（仍有玩家未确认，已等待 ' + NIGHT_ACK_TIMEOUT + 'ms）');
     room.nightHold = null;
     try { cb(); } catch (e) { console.error('[night] 超时推进异常:', e && e.stack || e); safeAdvance(room, 'timeout'); }
   }, NIGHT_ACK_TIMEOUT);
+}
+// 某玩家断开连接：若正处于「等待全员确认」的夜晚节奏中，视为该玩家已确认（不再等它），
+// 避免其掉线导致整桌白等 NIGHT_ACK_TIMEOUT 秒。
+function _dropNightAcker(room, token) {
+  const h = room.nightHold;
+  if (!h || !h.expected || !h.expected.has(token)) return;
+  h.expected.delete(token);
+  h.acks.add(token);
+  if ([...h.expected].every(t => h.acks.has(t))) {
+    clearNightHold(room);
+    try { h.cb(); } catch (e) { console.error('[night] 断线推进异常:', e && e.stack || e); safeAdvance(room, 'disconnect'); }
+  }
 }
 // 闭眼后的标准推进：先等客户端确认「闭眼」已念完（与语音同步），再维持 NIGHT_CLOSE_PAUSE 停顿，才进入下一位
 function holdNightCloseThen(room, cb) {
@@ -1371,6 +1395,7 @@ const server = http.createServer((req, res) => {
       room.sse = room.sse.filter(c => c !== client);
       const pp = findPlayer(room, token); if (pp) pp.connected = room.sse.some(c => c.token === token);
       if (room.voice.has(token)) { room.voice.delete(token); broadcast(room, 'voice', { seats: voiceSeats(room) }); }
+      _dropNightAcker(room, token);   // 掉线玩家不再等待其播报确认，避免整桌白等超时
     });
     return;
   }
@@ -1509,8 +1534,18 @@ const server = http.createServer((req, res) => {
           if (p.token !== room.hostToken) return sendJSON(res, { error: '仅房主可重开' });
           restartGame(room); break;
         case 'nightAck':
-          // 客户端确认当前角色的「闭眼」播报已念完：推进夜晚到下一位 / 进入白天（音文同步节奏）
-          if (room.nightHold) { const cb = room.nightHold; clearNightHold(room); try { cb(); } catch (e) { console.error('[night] nightAck 推进异常:', e && e.stack || e); safeAdvance(room, 'nightAck'); } }
+          // 客户端确认当前角色的「闭眼」播报已念完：仅当「所有在线真人客户端」都确认后才推进夜晚，
+          // 保证多人同房时大家的播报节奏严格对齐（音文同步）。任一客户端重复回执无害：acks 为 Set 自动去重。
+          if (room.nightHold) {
+            const hold = room.nightHold;
+            hold.acks.add(token);
+            const allAcked = [...hold.expected].every(t => hold.acks.has(t));
+            if (allAcked) {
+              clearNightHold(room);
+              try { hold.cb(); } catch (e) { console.error('[night] nightAck 推进异常:', e && e.stack || e); safeAdvance(room, 'nightAck'); }
+            }
+            // 否则继续等待其余客户端确认
+          }
           return sendJSON(res, { ok: true });
         case 'ping': break;
       case 'voice': {
