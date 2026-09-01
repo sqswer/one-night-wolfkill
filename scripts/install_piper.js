@@ -1,10 +1,10 @@
 'use strict';
 // 下载并安装 Piper TTS 二进制 + 中文模型到 tts-bin/（仅首次部署需要联网）。
 // 用法：
-//   node scripts/install_piper.js            # 默认中文女声 huayan
-//   node scripts/install_piper.js chaowen    # 中文女声 chaowen
-//   node scripts/install_piper.js xiao_ya    # 中文女声 xiao_ya
+//   node scripts/install_piper.js            # 默认中文女声 huayan（官方 zh_CN 唯一可用中文音色）
 // 安装完成后重启服务（无需设 TTS_PROVIDER，检测到文件即自动启用 Piper）。
+// 注：官方 piper-voices 的 zh_CN 仅 huayan 可用（xiao_ya 与 espeak-ng 音素化器不兼容、
+//     chaowen 在官方目录未确认存在），故仅保留 huayan；传入其它参数会自动回退到 huayan。
 // 二进制来自 GitHub Releases（rhasspy/piper，MIT）；中文模型来自 HuggingFace（rhasspy/piper-voices）。
 
 const fs = require('fs');
@@ -17,13 +17,13 @@ const OUT = path.join(ROOT, 'tts-bin');
 fs.mkdirSync(OUT, { recursive: true });
 
 // 可用中文模型（HuggingFace 路径段）：zh/zh_CN/<name>/medium/zh_CN-<name>-medium.onnx
+// 仅保留官方可用且稳定者（huayan）。xiao_ya 与 espeak-ng 不兼容、chaowen 官方目录未确认存在，已移除。
 const VOICES = {
-  huayan:   'huayan',
-  chaowen:  'chaowen',
-  xiao_ya:  'xiao_ya',
+  huayan: 'huayan',
 };
 const arg = (process.argv[2] || 'huayan').toLowerCase();
 const name = VOICES[arg] || 'huayan';
+if (!VOICES[arg]) console.warn(`⚠️ 未识别的音色 "${arg}"，已回退到默认 huayan`);
 const modelFile = `zh_CN-${name}-medium.onnx`;
 
 // Piper 二进制 release（按系统/架构选资产）；注意发布标签是日期格式，非 v1.2.0
