@@ -1667,5 +1667,21 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`一夜狼人杀在线版已启动： http://localhost:${PORT}`);
-  console.log(`同局域网手机访问： http://<本机IP>:${PORT}`);
+  // 真机调试：打印真实局域网 IP，手机（与电脑同 WiFi）直接打开即可听到服务端 Piper 语音，无需部署
+  const lanIPs = [];
+  try {
+    const { networkInterfaces } = require('os');
+    const nets = networkInterfaces();
+    for (const name of Object.keys(nets)) {
+      for (const ni of nets[name] || []) {
+        if (ni.family === 'IPv4' && !ni.internal) lanIPs.push(ni.address);
+      }
+    }
+  } catch (_) {}
+  if (lanIPs.length) {
+    console.log(`同局域网手机访问（真机调试）：`);
+    lanIPs.forEach(ip => console.log(`  http://${ip}:${PORT}`));
+  } else {
+    console.log(`同局域网手机访问： http://<本机IP>:${PORT}（未检测到局域网网卡）`);
+  }
 });

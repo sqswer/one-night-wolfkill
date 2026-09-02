@@ -893,6 +893,7 @@ let _serverTtsFails = 0;         // 服务端 TTS 连续失败次数（单次失
 let _serverTtsWarned = false;    // 服务端 TTS 不可用提示是否已弹过
 let _serverAudioEl = null;       // 当前正在播放的服务端语音 <audio> 实例（供 stopAnnounce 停止）
 let _serverAudioSeq = 0;         // 服务端语音序列号：上一条音频迟到的 onended/error 不会误关/误推进当前这条
+let _serverTtsDown = false;      // 服务端 TTS 是否已判不可用（连续失败达阈值后本局降级本地，不再无谓重试网络）
 let _audioUnlocked = false;      // 移动端 WebView 自动播放策略：是否已在用户手势中预热解锁
 
 // ---- 服务端语音预取 ----
@@ -1212,12 +1213,12 @@ function _ttsDoSpeak(text, attempt) {
 }
 function _speakOne(text) {
   _ttsRetryCount = 0; _ttsCurrentText = text;
-  // 本地语音引擎可用（有中文语音）→ 走浏览器内置 Web Speech；
-  // 否则（Via / 小米自带浏览器等无引擎）→ 走服务端内置 Piper TTS，
-  // 服务端失败则仅文字显示，绝不卡住队列。
-  const localOk = _ttsSupported && _ttsVoices.length > 0;
-  if (localOk) _ttsDoSpeak(text, 0);
-  else _speakServer(text, () => {});
+  // 本项目语音核心 = 服务端内置 Piper TTS（自托管、稳定、国产手机可听，不依赖系统是否带中文语音引擎）。
+  // 仅在服务端被判不可用（_serverTtsDown：连续失败达阈值后本局降级）时，才回退到浏览器本地 Web Speech；
+  // 本地引擎在 Via / 小米等 WebView 上常「存在却静默不发声」，绝不能作为默认主路径——
+  // 这正是之前“服务端 tts 出不来音”的根因：本地被误判可用，服务端 Piper 兜底根本没用上。
+  if (!_serverTtsDown) _speakServer(text, () => {});
+  else _ttsDoSpeak(text, 0);
 }
 
 /** 服务端内置 Piper TTS：本地无语音引擎时（如 Via / 小米自带浏览器），从 /api/tts 拉取合成语音用 <audio> 播放。
@@ -1244,9 +1245,12 @@ function _speakServer(text, fallback) {
     _serverTtsFails++;
     dbg('fail', reason || '', 'fails=' + _serverTtsFails);
     if (_ttsDebug && reason) toast('TTS调试: ' + reason);
-    if (_serverTtsFails >= 3 && !_serverTtsWarned) {
-      _serverTtsWarned = true;
-      toast('服务端语音连续失败，已改为文字显示。建议检查 Bonto 服务端 Piper TTS。');
+    if (_serverTtsFails >= 3) {
+      _serverTtsDown = true;   // 本局降级：后续播报直接走本地兜底/文字，不再每条都重试 3 次网络（移动端避免无谓等待）
+      if (!_serverTtsWarned) {
+        _serverTtsWarned = true;
+        toast('服务端语音连续失败，已降级为本地语音/文字显示。建议检查 Bonto 服务端 Piper TTS 是否可用。');
+      }
     }
     _afterUtterance();   // 失败也继续推进，绝不让队列卡死、也不让单条无声拖垮整桌节奏
   };
