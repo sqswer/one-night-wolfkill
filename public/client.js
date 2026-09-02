@@ -913,6 +913,7 @@ let _ttsLastEnqueued = '';     // 入队去重：避免同一条播报重复入�
 let _lastAnnSeq = 0;           // 已处理到的服务端播报序号（annLog 幂等补齐的水位线）
 let _currentAnnText = '';      // 当前正显示/播报的文本
 let _annHistory = [];          // 播报历史（用于展示所有播报内容）
+let _shownAnnSeqs = new Set(); // 已展示过的播报 seq（幂等守卫：防实时/补发双通道把同一条重复插入记录区）
 let _audioCtx = null;          // 用于 Via/移动端 WebView 解锁音频自动播放
 let _ttsSupported = ('speechSynthesis' in window);
 let _ttsCurrentText = null;    // 当前正在朗读的文本（供静默失败重试判断）
@@ -924,6 +925,7 @@ let _ttsCurrentStarted = false;// 当前 utterance 是否已真正开始（onsta
 let _ttsRetryCount = 0;        // 当前语句静默失败重试次数
 let _ttsWatchdog = null;        // 单条朗读的超时看门狗（防 onend 不触发导致队列卡死）
 let _ttsStartWatchdog = null;   // 检测 speak 是否真正启动的看门狗
+let _ttsTotalWatchdog = null;   // 单条「开始播放→推进下一条」总看门狗：任何路径卡死都强制推进，保证文字不丢、夜晚不卡
 let _ttsSeq = 0;                 // 朗读序列号：cancel() 触发的旧 onend 不会误推进队列
 let _serverTtsFails = 0;         // 服务端 TTS 连续失败次数（单次失败不永久禁用，避免偶发网络/解码抖动导致整局无语音）
 let _serverTtsWarned = false;    // 服务端 TTS 不可用提示是否已弹过
@@ -1089,17 +1091,23 @@ function claimAnnouncement(d) {
  */
 function speakAnnouncement(d) {
   if (!claimAnnouncement(d)) return;
-  // 屏中央大字 + 播报记录：与 TTS 流程解耦，立即追加（即使 TTS 尚未解锁/引擎不可用，ann-history 也会逐条累积），
-  // 避免「TTS 还没起来 → 队列没处理 → 玩家只看到最后一条」漏看完整历史的情况。
-  addAnnHistory(d.text);
-  // 上帝视角：顺序入队（携带步数/类型/阶段/角色名，供音文同步时驱动夜间 UI 揭示），由 _ttsDrain 逐条完整朗读
-  _ttsQueue.push({ text: d.text, step: d.step || 0, kind: d.kind || null, stage: d.stage || null, roleName: d.roleName || null });
-  // 语音关闭：文字立即展示，且「闭眼」播报视为已展示直接回执服务端推进（无音频可听，靠节奏兜底）
+  const item = { seq: (typeof d.seq === 'number' ? d.seq : 0), text: d.text, step: d.step || 0, kind: d.kind || null, stage: d.stage || null, roleName: d.roleName || null };
+  // 语音关闭：没有音频节奏可依，文字立即展示并直接回执推进。
+  // 注意这里【不入队】——否则用户中途再打开语音时，积压的旧条目会被整批重播，造成严重的音文错位。
   if (!ttsOn) {
-    showAnnItem(d);
-    if (d.kind === 'close') sendNightAck();
+    showAnnItem(item);
+    if (item.kind === 'close') sendNightAck();
     return;
   }
+  // 上帝视角：顺序入队（携带 seq / 步数 / 类型 / 阶段 / 角色名），由 _ttsDrain 逐条完整朗读。
+  // ⚠️ 音文同步铁律：此处【绝不可】addAnnHistory / showAnnItem。
+  //    文字必须等 _ttsDrain 真正轮到本条朗读时再展示，否则播报记录会随 SSE 一路狂奔、跑到语音前面
+  //    （历史 Bug：文本已刷到「守夜人」、语音还停在「狼人」，且记录区出现 A B C A B C 的重复错乱）。
+  //    记录完整性不再靠「立即追加」保证，改由 _ttsDrain 的总看门狗兜底——任何路径卡死都会强制推进并展示，绝不丢条。
+  _ttsQueue.push(item);
+  // 实时(speak/announce) 与补发(syncAnnLog) 两通道合流后，仍按服务端 seq 严格有序，
+  // 避免补发的历史条目插到尚未播放的条目前面造成顺序错乱。
+  _ttsQueue.sort((a, b) => a.seq - b.seq);
   // 语音开启：文字不要在这里展示——等 _ttsDrain 真正轮到本条朗读时再 showAnnItem，
   // 保证「播报记录」和界面大字与语音/音频节奏一致，避免文本因 SSE 提前到达而抢跑。
   // 「闭眼」回执(nightAck) 也不放这里，交给音频真正结束（本地 onend 或服务端音频 ended）或 4.5s 兜底定时器，
@@ -1155,6 +1163,7 @@ function addAnnHistory(text) {
 /** 清空播报历史（新游戏开始时调用） */
 function clearAnnHistory() {
   _annHistory = [];
+  _shownAnnSeqs = new Set();   // 新一局：清空展示幂等集合，避免上一局的 seq 残留把本局首条误判为已展示
   const el = $('#ann-history');
   if (el) el.innerHTML = '';
 }
@@ -1169,6 +1178,17 @@ function clearAnnHistory() {
  *  使界面（步骤条、可操作窗口）与语音/文字播报保持同一节奏，不再抢跑。 */
 function showAnnItem(d) {
   const text = d.text;
+  if (!text) return;
+  // 幂等守卫：实时(speak/announce) 与补发(syncAnnLog) 两通道可能就同一条各触发一次展示，
+  // 若不拦截，ann-history 会被重复插入并出现 A B C A B C 的顺序错乱（音文不同步的极端表现）。
+  if (typeof d.seq === 'number' && d.seq > 0) {
+    if (_shownAnnSeqs.has(d.seq)) return;
+    _shownAnnSeqs.add(d.seq);
+    if (_shownAnnSeqs.size > 200) {                    // 防止一局累积导致无界增长
+      const arr = [..._shownAnnSeqs].sort((a, b) => a - b);
+      _shownAnnSeqs = new Set(arr.slice(-100));
+    }
+  }
   const { step, kind, stage, roleName } = d;
   _currentAnnText = text;
   const annEl = $('#ann-text'); if (annEl) annEl.textContent = text;
@@ -1206,6 +1226,15 @@ function _ttsDrain() {
     if (_nightAckFallback) clearTimeout(_nightAckFallback);
     _nightAckFallback = setTimeout(() => { sendNightAck(); }, 4500);
   }
+  // 总看门狗：本条「开始播放 → 推进下一条」的整体兜底，覆盖所有失效路径——
+  // 服务端 /api/tts 请求挂起、<audio> 既不 onended 也不 onerror、本地 speechSynthesis 静默失败等。
+  // 超时即强制推进，保证队列绝不卡死；且由于文字展示已绑定到「出队时刻」，推进即意味着文字一定会展示、绝不丢条。
+  if (_ttsTotalWatchdog) clearTimeout(_ttsTotalWatchdog);
+  _ttsTotalWatchdog = setTimeout(() => {
+    if (_ttsCurrentItem !== item) return;    // 已正常推进（或已被后续条目取代），忽略
+    if (_ttsDebug) console.log('[tts-debug] 总看门狗触发，强制推进：' + item.text);
+    _afterUtterance();
+  }, Math.max(9000, item.text.length * 230 + 5000));
   _speakOne(item.text);
 }
 
@@ -1358,6 +1387,7 @@ function _afterUtterance() {
   const finished = _ttsCurrentItem;   // 刚播完的条目（含 kind），用于判断是否为「闭眼」回执
   _ttsCurrentItem = null;
   _ttsDraining = false;
+  if (_ttsTotalWatchdog) { clearTimeout(_ttsTotalWatchdog); _ttsTotalWatchdog = null; }
   // 当前播完的是某角色的「闭眼」播报 → 通知服务端推进下一位 / 进入白天（音文同步的关键）
   if (finished && finished.kind === 'close') { if (_nightAckFallback) { clearTimeout(_nightAckFallback); _nightAckFallback = null; } sendNightAck(); }
   setTimeout(_ttsDrain, 120);
@@ -1376,6 +1406,7 @@ function stopAnnounce() {
   if (_ttsUnlockWatchdog) { clearTimeout(_ttsUnlockWatchdog); _ttsUnlockWatchdog = null; }
   clearTimeout(_ttsWatchdog);
   clearTimeout(_ttsStartWatchdog);
+  if (_ttsTotalWatchdog) { clearTimeout(_ttsTotalWatchdog); _ttsTotalWatchdog = null; }
   if (_nightAckFallback) { clearTimeout(_nightAckFallback); _nightAckFallback = null; }
   if ('speechSynthesis' in window) try { speechSynthesis.cancel(); } catch (_) {}
   if (_serverAudioEl) { try { _serverAudioEl.pause(); _serverAudioEl.removeAttribute('src'); _serverAudioEl.load(); } catch (_) {} _serverAudioEl = null; }
