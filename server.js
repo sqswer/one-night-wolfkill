@@ -13,6 +13,57 @@ try {
   }
 } catch (_) {}
 
+// ====== 全量调试日志（服务端 + 客户端经 /api/debug-log 上送）======
+// 启用条件：URL 带 ?debuglog=1（客户端发请求时附），或环境变量 LOG_DEBUG=1（服务端始终写）
+// 输出：./logs/announce-YYYY-MM-DD.log （Bonto 用户可进 Web 终端 tail -f 查看整局时序）
+// 目的：定位「音文不同步 / 顺序错乱 / 闭眼后停顿 > 2000ms」时，拿到「服务端 announce 时刻 / SSE 推送时刻 / 客户端入队与出队时刻 / nightAck 回执时刻」全链时序
+const _debugLog = {
+  enabled: false,
+  fs: null,
+  path: null,
+  dir: null,
+  stream: null,
+  day: null,
+};
+function _debugLogInit() {
+  if (_debugLog.fs) return;
+  try {
+    _debugLog.fs = require('fs');
+    _debugLog.path = require('path');
+    _debugLog.dir = _debugLog.path.join(__dirname, 'logs');
+    if (!_debugLog.fs.existsSync(_debugLog.dir)) _debugLog.fs.mkdirSync(_debugLog.dir, { recursive: true });
+    _debugLogRotate();
+  } catch (e) { console.error('[debug-log] 初始化失败：', e && e.message || e); }
+}
+function _debugLogRotate() {
+  if (!_debugLog.fs) return;
+  const today = new Date().toISOString().slice(0, 10);
+  if (_debugLog.stream && today === _debugLog.day) return;
+  if (_debugLog.stream) { try { _debugLog.stream.end(); } catch (_) {} }
+  const _file = _debugLog.path.join(_debugLog.dir, 'announce-' + today + '.log');
+  _debugLog.stream = _debugLog.fs.createWriteStream(_file, { flags: 'a' });
+  _debugLog.day = today;
+}
+function debugLog(event, fields) {
+  if (!_debugLog.enabled) return;
+  _debugLogInit();
+  if (!_debugLog.fs) return;
+  _debugLogRotate();
+  const ts = new Date().toISOString();
+  const fieldsSafe = fields || {};
+  const room = fieldsSafe.room || '';
+  const tag = fieldsSafe.tag || '';
+  const rest = Object.keys(fieldsSafe).filter(k => k !== 'room' && k !== 'tag').map(k => k + '=' + JSON.stringify(fieldsSafe[k])).join(' ');
+  const line = '[' + ts + '] [' + event + '] [room=' + room + ']' + (tag ? ' [' + tag + ']' : '') + ' ' + rest + '\n';
+  try { _debugLog.stream.write(line); } catch (_) {}
+}
+function debugLogEnable(room) {
+  _debugLog.enabled = true;
+  _debugLogInit();
+  if (_debugLog.fs) debugLog('enable', { room: room || '' });
+}
+if (process.env.LOG_DEBUG === '1') debugLogEnable('ALL');
+
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -234,6 +285,7 @@ function announce(room, text, step, kind, stage, meta) {
   if (room.annLog.length > 120) room.annLog.shift();
   broadcast(room, 'speak', payload);
   broadcast(room, 'announce', payload);
+  debugLog('announce', { room: room.code, seq, text, kind: payload.kind, stage: payload.stage, step: payload.step, roleName: payload.roleName || '', sseClients: room.sse.length });
 }
 
 // 夜间节奏由「客户端语音播报确认」驱动：服务端在播完某角色「闭眼」后不再用固定计时器硬推进，
@@ -264,12 +316,17 @@ function holdNightAck(room, cb) {
   for (const c of room.sse) if (c.token) expected.add(c.token);
   if (expected.size === 0) {              // 无人在线（纯机器人 / 无头测试无连接）：无需等待，直接推进
     try { cb(); } catch (e) { console.error('[night] 推进异常:', e && e.stack || e); safeAdvance(room, 'noop'); }
+    debugLog('night-hold-skip', { room: room.code, reason: 'no-sse-clients' });
     return;
   }
   if (expected.size > 1) console.log('[night] 等待 ' + expected.size + ' 位在线玩家确认本条播报完成');
   room.nightHold = { cb, expected, acks: new Set() };
+  debugLog('night-hold-start', { room: room.code, expected: [...expected].map(t => t.slice(0, 6)), timeoutMs: NIGHT_ACK_TIMEOUT });
   room.nightHoldTimer = setTimeout(() => {
+    const got = room.nightHold ? [...room.nightHold.acks].map(t => t.slice(0, 6)) : [];
+    const miss = room.nightHold ? [...room.nightHold.expected].filter(t => !room.nightHold.acks.has(t)).map(t => t.slice(0, 6)) : [];
     console.warn('[night] 超时兜底推进（仍有玩家未确认，已等待 ' + NIGHT_ACK_TIMEOUT + 'ms）');
+    debugLog('night-hold-timeout', { room: room.code, waitedMs: NIGHT_ACK_TIMEOUT, acked: got, missing: miss });
     room.nightHold = null;
     try { cb(); } catch (e) { console.error('[night] 超时推进异常:', e && e.stack || e); safeAdvance(room, 'timeout'); }
   }, NIGHT_ACK_TIMEOUT);
@@ -289,7 +346,12 @@ function _dropNightAcker(room, token) {
 // 闭眼后的标准推进：先等客户端确认「闭眼」已念完（与语音同步），再维持 NIGHT_CLOSE_PAUSE 停顿，才进入下一位
 function holdNightCloseThen(room, cb) {
   holdNightAck(room, () => {
-    room.nightTimer = setTimeout(() => { room.nightTimer = null; cb(); }, NIGHT_CLOSE_PAUSE);
+    const startedAt = Date.now();
+    debugLog('night-close-pause-start', { room: room.code, configuredMs: NIGHT_CLOSE_PAUSE });
+    room.nightTimer = setTimeout(() => {
+      debugLog('night-close-pause-elapsed', { room: room.code, waitedMs: Date.now() - startedAt });
+      room.nightTimer = null; cb();
+    }, NIGHT_CLOSE_PAUSE);
   });
 }
 
@@ -1455,6 +1517,8 @@ const server = http.createServer((req, res) => {
     const { code, token } = parsed.query;
     const room = rooms.get(code);
     if (!room || !token || !findPlayer(room, token)) { res.writeHead(400); res.end('invalid'); return; }
+    // 客户端 URL 带 ?debuglog=1 → 开启服务端日志（写入 ./logs/announce-YYYY-MM-DD.log）
+    if (parsed.query && parsed.query.debuglog === '1') { debugLogEnable(room.code); debugLog('sse-open', { room: room.code, tag: token.slice(0, 6) }); }
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
     res.write('retry: 3000\n\n');
     const client = { token, res };
@@ -1462,11 +1526,32 @@ const server = http.createServer((req, res) => {
     const p = findPlayer(room, token); if (p) p.connected = true;
     // 立即推送当前状态
     res.write(`event: state\ndata: ${JSON.stringify(buildState(room, p))}\n\n`);
+    debugLog('sse-state-pushed', { room: room.code, tag: token.slice(0, 6), phase: room.phase, annSeq: room.annSeq, annLogLen: room.annLog.length });
     req.on('close', () => {
       room.sse = room.sse.filter(c => c !== client);
       const pp = findPlayer(room, token); if (pp) pp.connected = room.sse.some(c => c.token === token);
       if (room.voice.has(token)) { room.voice.delete(token); broadcast(room, 'voice', { seats: voiceSeats(room) }); }
       _dropNightAcker(room, token);   // 掉线玩家不再等待其播报确认，避免整桌白等超时
+      debugLog('sse-close', { room: room.code, tag: token.slice(0, 6), remaining: room.sse.length, phase: room.phase });
+    });
+    return;
+  }
+
+  // 客户端调试日志上送通道：批量写入同一文件，便于人工对齐服务端 announce 时间戳
+  if (req.method === 'POST' && pathname === '/api/debug-log') {
+    let body = ''; req.on('data', d => body += d);
+    req.on('end', () => {
+      try {
+        const o = JSON.parse(body);
+        if (o && o.code) debugLogEnable(o.code);
+        const events = (o && o.events) || [];
+        for (const ev of events) {
+          // ev: { event, fields:{...}, ts?: clientTimeISO }
+          const fields = Object.assign({ room: (o && o.code) || '' }, ev.fields || {}, { tag: 'CLIENT', clientTs: ev.ts || '' });
+          debugLog('C-' + ev.event, fields);
+        }
+        sendJSON(res, { ok: true, count: events.length });
+      } catch (e) { sendJSON(res, { ok: false, error: String(e && e.message || e) }, 400); }
     });
     return;
   }
@@ -1615,12 +1700,17 @@ const server = http.createServer((req, res) => {
           if (room.nightHold) {
             const hold = room.nightHold;
             hold.acks.add(token);
+            debugLog('night-ack-received', { room: room.code, tag: token.slice(0, 6), acked: hold.acks.size, expected: hold.expected.size });
             const allAcked = [...hold.expected].every(t => hold.acks.has(t));
             if (allAcked) {
               clearNightHold(room);
               try { hold.cb(); } catch (e) { console.error('[night] nightAck 推进异常:', e && e.stack || e); safeAdvance(room, 'nightAck'); }
+              debugLog('night-ack-all-received', { room: room.code });
             }
             // 否则继续等待其余客户端确认
+          } else {
+            // 收到一条非预期的回执（服务端 hold 已结束 / 被超时清掉）——记下来排查「客户端误回执导致 hold 提前释放」
+            debugLog('night-ack-stray', { room: room.code, tag: token.slice(0, 6), phase: room.phase, annSeq: room.annSeq });
           }
           return sendJSON(res, { ok: true });
         case 'ping': break;

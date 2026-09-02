@@ -146,16 +146,20 @@ function saveLocal() {
 // --------------------------- SSE ---------------------------
 function connectSSE() {
   if (es) es.close();
-  es = new EventSource(`/api/stream?code=${encodeURIComponent(STATE.code)}&token=${encodeURIComponent(STATE.token)}`);
-  es.onopen = () => { $('#conn-dot').classList.add('on'); _sseErrCount = 0; };
+  const url = `/api/stream?code=${encodeURIComponent(STATE.code)}&token=${encodeURIComponent(STATE.token)}` + (_debuglog ? '&debuglog=1' : '');
+  es = new EventSource(url);
+  _debuglogPush('sse-open', { url: url.replace(/token=[^&]+/, 'token=***') });
+  es.onopen = () => { $('#conn-dot').classList.add('on'); _sseErrCount = 0; _debuglogPush('sse-onopen', {}); };
   es.onerror = () => {
     $('#conn-dot').classList.remove('on');
     _sseErrCount++;
+    _debuglogPush('sse-error', { count: _sseErrCount });
     // Bonto 冷启动偶发返回 HTML 而非事件流：EventSource 默认会自愈重连，但若拿到的是一条不关闭的
     // stuck HTML 连接则永不触发 onerror，整页会卡在加载/收不到播报。连续 3 次错误后强制重建一次连接，
     // 重新请求事件流，绕过抖动的实例。
     if (_sseErrCount >= 3 && !_sseRecreating) {
       _sseRecreating = true;
+      _debuglogPush('sse-rebuild', { reason: '3-errors' });
       setTimeout(() => { _sseRecreating = false; _sseErrCount = 0; connectSSE(); }, 400);
     }
   };
@@ -989,6 +993,26 @@ function _unlockAudio() {
   document.addEventListener(ev, _unlockAudio, { passive: true, once: false }));
 let _localTtsFailed = false;     // 本地语音引擎是否确认不可用（用于提示文案）
 let _ttsDebug = /[?&]ttsdebug=1/.test(location.search || '');  // URL 带 ?ttsdebug=1 时打印语音链路调试日志
+const _debuglog = /[?&]debuglog=1/.test(location.search || '');   // URL 带 ?debuglog=1 时把客户端关键事件推送到服务端日志文件
+const _debuglogBuf = [];        // 待批量推送的事件队列（避免每条都 fetch）
+let _debuglogFlushTimer = null;
+let _debuglogSendInFlight = false;
+function _debuglogPush(event, fields) {
+  if (!_debuglog) return;
+  _debuglogBuf.push({ event, ts: new Date().toISOString(), fields: fields || {} });
+  if (_debuglogBuf.length >= 25 || (event === 'sse-open' || event === 'sse-error' || event === 'sse-close')) _debuglogFlush();
+  else if (!_debuglogFlushTimer) _debuglogFlushTimer = setTimeout(_debuglogFlush, 800);
+}
+function _debuglogFlush() {
+  if (_debuglogFlushTimer) { clearTimeout(_debuglogFlushTimer); _debuglogFlushTimer = null; }
+  if (_debuglogSendInFlight || !_debuglogBuf.length) return;
+  const batch = _debuglogBuf.splice(0, _debuglogBuf.length);
+  _debuglogSendInFlight = true;
+  const body = JSON.stringify({ code: STATE && STATE.code, events: batch });
+  fetch('/api/debug-log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
+    .catch(() => { _debuglogBuf.unshift(...batch); })   // 失败回灌，避免丢事件
+    .finally(() => { _debuglogSendInFlight = false; if (_debuglogBuf.length) _debuglogFlushTimer = setTimeout(_debuglogFlush, 800); });
+}
 // 注：现已统一走服务端内置 Piper TTS（自托管、免费、国内可部署），移除了百度 key 与浏览器直连微软兜底。
 
 function _ttsLoadVoices() {
@@ -1063,12 +1087,15 @@ let _ttsWarned = false;
 function syncAnnLog(log) {
   if (!log || !log.length) return;
   const lastSeq = log[log.length - 1].seq;
+  let pushed = 0;
   for (const it of log) {
     if (it.seq <= _lastAnnSeq) continue;
-    if (it.seq === lastSeq) { speakAnnouncement(it); continue; }   // 最新一条：正常走语音流程
+    if (it.seq === lastSeq) { speakAnnouncement(it); pushed++; continue; }   // 最新一条：正常走语音流程
     if (!claimAnnouncement(it)) continue;
     replayAnnouncement(it);
+    pushed++;
   }
+  _debuglogPush('sync-annlog', { received: log.length, pushed, headSeq: log[0].seq, lastSeq, lastSeenSeq: _lastAnnSeq });
 }
 
 /** 播报幂等去重：以服务端自增 seq 为准（三条通道 speak / state.annLog 只会生效一次）。
@@ -1107,7 +1134,9 @@ function speakAnnouncement(d) {
   _ttsQueue.push(item);
   // 实时(speak/announce) 与补发(syncAnnLog) 两通道合流后，仍按服务端 seq 严格有序，
   // 避免补发的历史条目插到尚未播放的条目前面造成顺序错乱。
-  _ttsQueue.sort((a, b) => a.seq - b.seq);
+  // ⚠️ 潜在坑：undefined 减数字 = NaN，NaN 比较恒 false 会让无 seq 的项排到队首破坏排序；显式 fallback 把它送到队尾。
+  _ttsQueue.sort((a, b) => (a.seq || 1e15) - (b.seq || 1e15));
+  _debuglogPush('speak-pushed', { seq: item.seq, text: item.text, kind: item.kind, stage: item.stage, queueLen: _ttsQueue.length });
   // 语音开启：文字不要在这里展示——等 _ttsDrain 真正轮到本条朗读时再 showAnnItem，
   // 保证「播报记录」和界面大字与语音/音频节奏一致，避免文本因 SSE 提前到达而抢跑。
   // 「闭眼」回执(nightAck) 也不放这里，交给音频真正结束（本地 onend 或服务端音频 ended）或 4.5s 兜底定时器，
@@ -1193,6 +1222,7 @@ function showAnnItem(d) {
   _currentAnnText = text;
   const annEl = $('#ann-text'); if (annEl) annEl.textContent = text;
   addAnnHistory(text);
+  _debuglogPush('show-annitem', { seq: d.seq, text, kind, stage, step, roleName: roleName || '' });
   // 夜间 UI 揭示：仅在「睁眼/闭眼」播报真正展示时才推进，跟随语音节奏
   if (kind && stage) {
     if (kind === 'stage') { _openStep = 0; _closedStep = 0; _openStage = stage; _openRoleName = ''; }
@@ -1218,6 +1248,7 @@ function _ttsDrain() {
     if (_ttsLastDrainAt) console.log('[tts-debug] 与上一条间隔 ' + (now - _ttsLastDrainAt) + 'ms');
     _ttsLastDrainAt = now;
   }
+  _debuglogPush('drain-shift', { seq: item.seq, text: item.text, kind: item.kind, remaining: _ttsQueue.length });
   // 文字与语音同步：轮到本条朗读时才把播报区切换到本条文字
   showAnnItem(item);
   // 「闭眼」播报：无论 TTS 是否正常结束，都设一个兜底定时器确保通知服务端推进，
@@ -1233,6 +1264,7 @@ function _ttsDrain() {
   _ttsTotalWatchdog = setTimeout(() => {
     if (_ttsCurrentItem !== item) return;    // 已正常推进（或已被后续条目取代），忽略
     if (_ttsDebug) console.log('[tts-debug] 总看门狗触发，强制推进：' + item.text);
+    _debuglogPush('watchdog-total', { seq: item.seq, text: item.text, kind: item.kind, waitedMs: Math.max(9000, item.text.length * 230 + 5000) });
     _afterUtterance();
   }, Math.max(9000, item.text.length * 230 + 5000));
   _speakOne(item.text);
@@ -1388,6 +1420,7 @@ function _afterUtterance() {
   _ttsCurrentItem = null;
   _ttsDraining = false;
   if (_ttsTotalWatchdog) { clearTimeout(_ttsTotalWatchdog); _ttsTotalWatchdog = null; }
+  _debuglogPush('after-utterance', { seq: finished && finished.seq, text: finished && finished.text, kind: finished && finished.kind, remaining: _ttsQueue.length });
   // 当前播完的是某角色的「闭眼」播报 → 通知服务端推进下一位 / 进入白天（音文同步的关键）
   if (finished && finished.kind === 'close') { if (_nightAckFallback) { clearTimeout(_nightAckFallback); _nightAckFallback = null; } sendNightAck(); }
   setTimeout(_ttsDrain, 120);
