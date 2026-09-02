@@ -1000,7 +1000,12 @@ function _unlockAudio() {
   document.addEventListener(ev, _unlockAudio, { passive: true, once: false }));
 let _localTtsFailed = false;     // 本地语音引擎是否确认不可用（用于提示文案）
 let _ttsDebug = /[?&]ttsdebug=1/.test(location.search || '');  // URL 带 ?ttsdebug=1 时打印语音链路调试日志
-const _debuglog = /[?&]debuglog=1/.test(location.search || '');   // URL 带 ?debuglog=1 时把客户端关键事件推送到服务端日志文件
+// URL 带 ?debuglog=1 时把客户端关键事件推送到服务端日志文件。
+// 一旦带上就写入 localStorage，同浏览器后续重连 / 重开本局都自动保持，
+// 避免「中途刷新或连上时游戏已到结算 → 整段夜间日志漏抓」的情况（实测踩过此坑）。
+let _debuglog = /[?&]debuglog=1/.test(location.search || '');
+if (_debuglog) { try { localStorage.setItem('onw_debuglog', '1'); } catch (_) {} }
+else { try { if (localStorage.getItem('onw_debuglog') === '1') _debuglog = true; } catch (_) {} }
 const _debuglogBuf = [];        // 待批量推送的事件队列（避免每条都 fetch）
 let _debuglogFlushTimer = null;
 let _debuglogSendInFlight = false;
