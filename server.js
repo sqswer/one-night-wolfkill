@@ -194,6 +194,11 @@ function makeRoom(hostName, capacity = 5) {
     sse: [],                // {token, res}
     voice: new Set(),      // 开启语音的玩家 token 集合（WebRTC mesh 信令由服务器转发，音频走 P2P 不经过服务器）
     voiceInvites: {},      // token -> {fromSeat, fromName, at}：待处理的语音邀请（有状态，重连/刷新后仍可收到）
+    insomniacRevealed: new Set(),  // 已揭示过最终身份的失眠者 token 集合（防止 finalRole 在 insomniac 揭示前提前泄漏）
+    // 播报权威日志：每条 announce 都有自增 seq，完整随 state 下发。
+    // 客户端按 seq 幂等补齐——断线重连/刷新/漏收 SSE 后仍能补回完整播报记录，不会「从某位角色开始才播」。
+    annSeq: 0,
+    annLog: [],            // {seq,text,step,kind,stage,roleName}
   };
   rooms.set(code, room);
   return room;
@@ -218,6 +223,15 @@ function announce(room, text, step, kind, stage, meta) {
   }
   const payload = { text, step: step || 0, kind: kind || null, stage: stage || null };
   if (meta) Object.assign(payload, meta);
+  // 播报权威日志：每条自增 seq，随 state 全量下发（客户端按 seq 幂等补齐，漏收/重连也能补全记录）
+  const seq = ++room.annSeq;
+  payload.seq = seq;
+  room.annLog.push({
+    seq, text,
+    step: payload.step, kind: payload.kind, stage: payload.stage,
+    roleName: (meta && meta.roleName) || null,
+  });
+  if (room.annLog.length > 120) room.annLog.shift();
   broadcast(room, 'speak', payload);
   broadcast(room, 'announce', payload);
 }
@@ -366,8 +380,10 @@ function buildState(room, player) {
     you = { seat: player.seat, role: rk ? { key: rk, name: ROLES[rk].name, team: ROLES[rk].team } : null };
     if (room.privateInfo[player.token]) you.seen = room.privateInfo[player.token];
     if (room.marks[player.seat]) you.mark = markDesc(room, player.seat);
-    // 仅失眠者在白天补充"最终身份"小字（其能力为天亮前查看自身最终身份）
-    if (rk === 'insomniac') {
+    // 仅失眠者在其「夜晚最终身份」揭示之后，buildState 才向其本人推送 finalRole。
+    // 揭示前（开局发牌后、强盗/酒鬼/村庄白痴等换牌过程中）必须保持 initialRole 不变，
+    // 否则 finalRole 会偷看 insomniac 揭示之前的中间结果（nightOrder 97 才是官方揭示点）。
+    if (rk === 'insomniac' && room.insomniacRevealed && room.insomniacRevealed.has(player.token)) {
       const fk = room.currentRole[player.seat];
       you.finalRole = fk ? { key: fk, name: ROLES[fk].name } : null;
     }
@@ -404,6 +420,7 @@ function buildState(room, player) {
     you,
     action,
     announce: room.announce,
+    annLog: room.annLog,        // 本局完整播报日志（带 seq），客户端幂等补齐，保证记录不缺失
     log: room.log,
     votes: votesView,
     discussionEndsAt: room.discussionEndsAt,
@@ -566,7 +583,11 @@ function startGame(room) {
   room.lovePair = null;
   room.assassinTarget = null;
   room.privateInfo = {};
+  room.insomniacRevealed = new Set();
   room.votes = {};
+  // 新一局：播报日志与序号清零（客户端据此从头补齐，不会残留上一局）
+  room.annSeq = 0;
+  room.annLog = [];
   room.protectTarget = null;
   room.hunterPending = null;
   room.result = null;
@@ -764,7 +785,11 @@ function roleReveal(role, room, seats) {
     const c = room.centerCards[Math.floor(Math.random() * room.centerCards.length)];
     seats.forEach(s => { out[s] = `见习预言家：你查看的中央底牌是【${ROLES[c.role].name}】。`; });
   } else if (role === 'insomniac') {
-    seats.forEach(s => { out[s] = `失眠者：天亮前你最后的身份是【${ROLES[room.currentRole[s]].name}】。`; });
+    seats.forEach(s => {
+      const tk = room.players[s] && room.players[s].token;
+      if (tk) room.insomniacRevealed.add(tk);          // 标记该失眠者已揭示过最终身份（buildState 据此决定是否推送 finalRole）
+      out[s] = `失眠者：天亮前你最后的身份是【${ROLES[room.currentRole[s]].name}】。`;
+    });
   } else if (role === 'drunk') {
     // 强制盲换中央（随机一张）
     const ci = Math.floor(Math.random() * room.centerCards.length);

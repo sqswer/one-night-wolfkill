@@ -132,12 +132,14 @@ function connectSSE() {
     stopAnnounce();
     _ttsLastEnqueued = '';
     _ttsAutoUnlocking = false;
+    _lastAnnSeq = 0;                 // 新局播报序号归零，重新从第一条开始补
     _openStep = 0; _closedStep = 0; _openStage = null; _openRoleName = ''; _ttsCurrentItem = null; // 新局重置夜间揭示进度
     if (_nightAckFallback) { clearTimeout(_nightAckFallback); _nightAckFallback = null; }
   });
   es.addEventListener('speak', (e) => {
     const d = JSON.parse(e.data);
-    speakAnnounce(d.text, d.step, d.kind, d.stage, d.roleName); // speak 事件代表一条新播报，入队依次完整朗读（上帝视角）
+    // speak 事件代表一条新播报，入队依次完整朗读（上帝视角）
+    speakAnnouncement(d);
   });
   es.addEventListener('private', (e) => {
     const d = JSON.parse(e.data);
@@ -171,6 +173,9 @@ const PHASE_NAME = {
 let _lastPhase = null;
 function onState(s) {
   STATE.data = s;
+  // 播报补齐：SSE 漏收 / 断线重连 / 刷新页面后，用服务端权威日志把缺失的播报记录补回来。
+  // 必须在 renderGame 之前跑，保证界面与播报记录一致（不会出现「从某位角色才开始播」）。
+  syncAnnLog(s.annLog);
   // 语音邀请以服务端持久状态为准同步：断线重连/切后台回来后仍能收到邀请
   try { voiceSyncInvite(); } catch (_) {}
   voiceApplyPhase(s.phase);
@@ -867,7 +872,9 @@ let _ttsQueue = [];            // 待播报队列（上帝视角：所有角色�
 let _ttsDraining = false;      // 是否正在逐条播报
 let _ttsUnlocked = false;      // 是否已通过用户手势真正解锁（部分浏览器仅 resume 不够）
 let _ttsAutoUnlocking = false; // 是否已自动尝试解锁（避免重复触发兜底）
+let _ttsUnlockWatchdog = null; // 解锁看门狗：长期未解锁时降级为纯文字推进，绝不让整桌夜晚卡住
 let _ttsLastEnqueued = '';     // 入队去重：避免同一条播报重复入队
+let _lastAnnSeq = 0;           // 已处理到的服务端播报序号（annLog 幂等补齐的水位线）
 let _currentAnnText = '';      // 当前正显示/播报的文本
 let _annHistory = [];          // 播报历史（用于展示所有播报内容）
 let _audioCtx = null;          // 用于 Via/移动端 WebView 解锁音频自动播放
@@ -1006,21 +1013,49 @@ let _ttsWarned = false;
   window.addEventListener(ev, unlockTTS, { once: true, passive: true })
 );
 
+/** 播报补齐（补发通道）：断线重连 / 刷新页面 / SSE 漏收后，用服务端权威日志把缺失的播报记录补回来。
+ *  只补文字与界面进度，不补声音、也不补发 nightAck——避免重连瞬间一口气念一堆、或误推进夜晚。
+ *  最后一条按实时处理（该念的还是要念），其余仅补记录。 */
+function syncAnnLog(log) {
+  if (!log || !log.length) return;
+  const lastSeq = log[log.length - 1].seq;
+  for (const it of log) {
+    if (it.seq <= _lastAnnSeq) continue;
+    if (it.seq === lastSeq) { speakAnnouncement(it); continue; }   // 最新一条：正常走语音流程
+    if (!claimAnnouncement(it)) continue;
+    replayAnnouncement(it);
+  }
+}
+
+/** 播报幂等去重：以服务端自增 seq 为准（三条通道 speak / state.annLog 只会生效一次）。
+ *  老版本服务端不下发 seq 时退化为「与上一条文本比对」。 */
+function claimAnnouncement(d) {
+  if (!d || !d.text) return false;
+  if (typeof d.seq === 'number') {
+    if (d.seq <= _lastAnnSeq) return false;
+    _lastAnnSeq = d.seq;
+  } else if (d.text === _ttsLastEnqueued) {
+    return false;
+  }
+  _ttsLastEnqueued = d.text;
+  return true;
+}
+
 /** 加入一条播报（上帝视角：所有角色的播报都依次完整朗读，不再因打断而跳过）
  * 文字展示在此处无条件先完成，保证「每条播报都有对应文字」，不依赖语音是否可用/已解锁。
- * @param {string} text
+ * @param {object} d 服务端播报对象 {seq,text,step,kind,stage,roleName}
  */
-function speakAnnounce(text, step, kind, stage, roleName) {
-  if (!text) return;
-  // 入队去重：与最近入队内容相同则跳过，避免重复播报（同一条播报被 state/speak 重复推送时）
-  if (text === _ttsLastEnqueued) return;
-  _ttsLastEnqueued = text;
+function speakAnnouncement(d) {
+  if (!claimAnnouncement(d)) return;
+  // 屏中央大字 + 播报记录：与 TTS 流程解耦，立即追加（即使 TTS 尚未解锁/引擎不可用，ann-history 也会逐条累积），
+  // 避免「TTS 还没起来 → 队列没处理 → 玩家只看到最后一条」漏看完整历史的情况。
+  addAnnHistory(d.text);
   // 上帝视角：顺序入队（携带步数/类型/阶段/角色名，供音文同步时驱动夜间 UI 揭示），由 _ttsDrain 逐条完整朗读
-  _ttsQueue.push({ text, step: step || 0, kind: kind || null, stage: stage || null, roleName: roleName || null });
+  _ttsQueue.push({ text: d.text, step: d.step || 0, kind: d.kind || null, stage: d.stage || null, roleName: d.roleName || null });
   // 语音关闭：文字立即展示，且「闭眼」播报视为已展示直接回执服务端推进（无音频可听，靠节奏兜底）
   if (!ttsOn) {
-    showAnnItem(text, step, kind, stage, roleName);
-    if (kind === 'close') sendNightAck();
+    showAnnItem(d);
+    if (d.kind === 'close') sendNightAck();
     return;
   }
   // 语音开启：文字不要在这里展示——等 _ttsDrain 真正轮到本条朗读时再 showAnnItem，
@@ -1031,8 +1066,22 @@ function speakAnnounce(text, step, kind, stage, roleName) {
   if (!_ttsUnlocked && !_ttsAutoUnlocking) {
     _ttsAutoUnlocking = true;
     unlockTTS();
+    // 兜底看门狗：某些 WebView 在没有真实手势前永远不会解锁，若 3.5s 后队列仍积压，
+    // 就降级为「纯文字推进」——宁可没声音，也绝不让整桌夜晚卡在等待回执上。
+    if (_ttsUnlockWatchdog) clearTimeout(_ttsUnlockWatchdog);
+    _ttsUnlockWatchdog = setTimeout(() => {
+      _ttsUnlockWatchdog = null;
+      if (_ttsUnlocked || !ttsOn || !_ttsQueue.length) return;
+      _ttsUnlocked = true;
+      _ttsDrain();
+    }, 3500);
   }
   if (!_ttsDraining) _ttsDrain();
+}
+
+/** 补发通道专用：只把这条播报落到文字记录与界面进度，不发声、不回执 */
+function replayAnnouncement(d) {
+  showAnnItem(d);
 }
 
 /** 通知服务端：当前角色的「闭眼」播报已播完，可推进到下一位 / 进入白天（音文同步节奏） */
@@ -1046,8 +1095,12 @@ function addAnnHistory(text) {
   // 避免连续重复
   if (_annHistory.length && _annHistory[_annHistory.length - 1].text === text) return;
   _annHistory.push({ text, time: Date.now() });
-  if (_annHistory.length > 40) _annHistory.shift();
   const el = $('#ann-history');
+  // 上限调高到 80：7 人局 + 黄昏阶段最多可产生 40+ 条播报，40 的旧上限会把开场记录挤掉
+  while (_annHistory.length > 80) {
+    _annHistory.shift();
+    if (el && el.firstChild) el.removeChild(el.firstChild);   // 同步裁剪 DOM，避免只裁数组导致两侧不一致
+  }
   if (el) {
     const item = document.createElement('div');
     item.className = 'ann-history-item';
@@ -1072,7 +1125,9 @@ function clearAnnHistory() {
  *  两者在同一时刻发生，保证“播报记录”与语音/文字进度一致，不会提前走完。
  *  同时：若该条是某角色的「睁眼/闭眼」播报（kind 有值），则同步推进夜间步骤指示与行动窗口，
  *  使界面（步骤条、可操作窗口）与语音/文字播报保持同一节奏，不再抢跑。 */
-function showAnnItem(text, step, kind, stage, roleName) {
+function showAnnItem(d) {
+  const text = d.text;
+  const { step, kind, stage, roleName } = d;
   _currentAnnText = text;
   const annEl = $('#ann-text'); if (annEl) annEl.textContent = text;
   addAnnHistory(text);
@@ -1102,7 +1157,7 @@ function _ttsDrain() {
     _ttsLastDrainAt = now;
   }
   // 文字与语音同步：轮到本条朗读时才把播报区切换到本条文字
-  showAnnItem(item.text, item.step, item.kind, item.stage, item.roleName);
+  showAnnItem(item);
   // 「闭眼」播报：无论 TTS 是否正常结束，都设一个兜底定时器确保通知服务端推进，
   // 避免个别浏览器/WebView 的 speechSynthesis.onend 不触发导致夜晚永久卡在「闭眼」。
   if (item.kind === 'close') {
@@ -1249,6 +1304,7 @@ function stopAnnounce() {
   _ttsCurrentStarted = false;
   _ttsRetryCount = 0;
   _ttsAutoUnlocking = false;
+  if (_ttsUnlockWatchdog) { clearTimeout(_ttsUnlockWatchdog); _ttsUnlockWatchdog = null; }
   clearTimeout(_ttsWatchdog);
   clearTimeout(_ttsStartWatchdog);
   if (_nightAckFallback) { clearTimeout(_nightAckFallback); _nightAckFallback = null; }

@@ -34,6 +34,11 @@ const twoOthers = (players, self) => players.filter(p => p.seat !== self).map(p 
 
   const clients = tokens.map((tk) => sse(`/api/stream?code=${code}&token=${tk}`, async (ev, data) => {
     if (ev === 'private') { const m = data.text.match(/游戏开始时，你的身份是【(.+?)】/); if (m) initialByName[tk] = m[1]; }
+    // 夜晚推进由客户端回执驱动：服务端等所有在线玩家回 nightAck 才推进。
+    // 真实客户端在 TTS 念完「闭眼」后才回，这里用 100ms 模拟（多个客户端都回也不会重复推进）。
+    if (ev === 'speak' && data.kind === 'close') {
+      setTimeout(() => req('POST', '/api/action', { token: tk, type: 'nightAck', payload: {} }).catch(() => {}), 100);
+    }
     if (ev === 'state') {
       const s = data;
       // 行动
