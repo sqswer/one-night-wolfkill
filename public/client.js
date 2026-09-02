@@ -153,7 +153,10 @@ function connectSSE() {
   es.onerror = () => {
     $('#conn-dot').classList.remove('on');
     _sseErrCount++;
-    _debuglogPush('sse-error', { count: _sseErrCount });
+    // EventSource.readyState: 0=CONNECTING 1=OPEN 2=CLOSED
+    // 区分「重连中失败」与「已连接后中断」，是定位 Bonto 抖动的关键
+    _debuglogPush('sse-error', { count: _sseErrCount, readyState: es ? es.readyState : -1 });
+    _debuglogFlush();          // 断连瞬间强制推送，避免 buffer 里的事件随页面/连接一起丢失
     // Bonto 冷启动偶发返回 HTML 而非事件流：EventSource 默认会自愈重连，但若拿到的是一条不关闭的
     // stuck HTML 连接则永不触发 onerror，整页会卡在加载/收不到播报。连续 3 次错误后强制重建一次连接，
     // 重新请求事件流，绕过抖动的实例。
@@ -178,6 +181,9 @@ function connectSSE() {
   });
   es.addEventListener('speak', (e) => {
     const d = JSON.parse(e.data);
+    // speak 到达时刻：与服务端 payload 里的 serverTs 相减即为「服务端发出 → 客户端收到」的网络延迟。
+    // ⚠️ 该差值含两端时钟偏差，仅供量级参考（正常应 <500ms，异常时会到秒级）。
+    if (d.serverTs) _debuglogPush('speak-arrived', { seq: d.seq, text: d.text, kind: d.kind, networkMs: Date.now() - d.serverTs, serverTs: new Date(d.serverTs).toISOString() });
     // speak 事件代表一条新播报，入队依次完整朗读（上帝视角）
     speakAnnouncement(d);
   });
@@ -946,6 +952,7 @@ const _ttsAudioCache = new Map();   // text -> objectURL（先进先出，上限
 const _ttsPrefetching = new Set();  // 正在预取的文本，避免重复请求
 const TTS_AUDIO_CACHE_MAX = 12;
 let _ttsLastDrainAt = 0;            // 上一条开始播报的时间戳（?ttsdebug=1 时用于打印间隔）
+let _ttsLastEndAt = 0;              // 上一条「朗读结束」的时间戳（用于实测「闭眼后停顿」，正常应≈2000ms）
 function _ttsPrefetch(text) {
   if (!text || _ttsAudioCache.has(text) || _ttsPrefetching.has(text)) return;
   _ttsPrefetching.add(text);
@@ -1009,9 +1016,22 @@ function _debuglogFlush() {
   const batch = _debuglogBuf.splice(0, _debuglogBuf.length);
   _debuglogSendInFlight = true;
   const body = JSON.stringify({ code: STATE && STATE.code, events: batch });
-  fetch('/api/debug-log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
+  fetch('/api/debug-log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true })
     .catch(() => { _debuglogBuf.unshift(...batch); })   // 失败回灌，避免丢事件
     .finally(() => { _debuglogSendInFlight = false; if (_debuglogBuf.length) _debuglogFlushTimer = setTimeout(_debuglogFlush, 800); });
+}
+// 页面可见性 / 生命周期：手机切后台、锁屏、切微信会让浏览器节流定时器（setTimeout 最小间隔被拉长甚至暂停）、
+// 暂停音频、断开 SSE——这是「闭眼后停顿远大于 2000ms」的头号嫌疑。记录切前台/后台的精确时刻用于比对。
+if (typeof document !== 'undefined' && document.addEventListener) {
+  document.addEventListener('visibilitychange', () => {
+    _debuglogPush('visibility', { state: document.visibilityState, hidden: document.hidden });
+    _debuglogFlush();
+  });
+}
+if (typeof window !== 'undefined' && window.addEventListener) {
+  // 页面卸载前把剩余日志推走（keepalive 让请求在页面关闭后仍可完成）
+  window.addEventListener('pagehide', () => { _debuglogPush('pagehide', {}); _debuglogFlush(); });
+  window.addEventListener('beforeunload', () => { _debuglogPush('beforeunload', {}); _debuglogFlush(); });
 }
 // 注：现已统一走服务端内置 Piper TTS（自托管、免费、国内可部署），移除了百度 key 与浏览器直连微软兜底。
 
@@ -1248,7 +1268,15 @@ function _ttsDrain() {
     if (_ttsLastDrainAt) console.log('[tts-debug] 与上一条间隔 ' + (now - _ttsLastDrainAt) + 'ms');
     _ttsLastDrainAt = now;
   }
-  _debuglogPush('drain-shift', { seq: item.seq, text: item.text, kind: item.kind, remaining: _ttsQueue.length });
+  _debuglogPush('drain-shift', {
+    seq: item.seq, text: item.text, kind: item.kind, remaining: _ttsQueue.length,
+    // 用户实际感知的两个停顿指标（毫秒）：
+    //   gapSinceLastEnd = 上一条「朗读结束」→ 本条「开始朗读」= 纯粹的停顿（正常应≈2000，只出现在 close 之后）
+    //   gapSinceLastDrain = 上一条「开始」→ 本条「开始」= 整条周期（朗读时长 + 停顿）
+    gapSinceLastEnd: _ttsLastEndAt ? (Date.now() - _ttsLastEndAt) : -1,
+    gapSinceLastDrain: _ttsLastDrainAt ? (Date.now() - _ttsLastDrainAt) : -1,
+  });
+  _ttsLastDrainAt = Date.now();
   // 文字与语音同步：轮到本条朗读时才把播报区切换到本条文字
   showAnnItem(item);
   // 「闭眼」播报：无论 TTS 是否正常结束，都设一个兜底定时器确保通知服务端推进，
@@ -1343,9 +1371,16 @@ function _speakServer(text, fallback) {
     if (mySeq !== _serverAudioSeq) return;   // 已被新一条取代
     if (done) return; done = true;           // 一次性守卫：ended/error/play被拒 仅触发一次推进
     el.onended = el.onerror = null;
-    if (ok) { _serverTtsFails = 0; dbg('ended ok'); _afterUtterance(); return; }
+    const _seq = _ttsCurrentItem && _ttsCurrentItem.seq;
+    const _since = (typeof t0 === 'number') ? (Date.now() - t0) : -1;
+    if (ok) {
+      _serverTtsFails = 0; dbg('ended ok');
+      _debuglogPush('tts-ended', { seq: _seq, text, sinceStartMs: _since, audioDurationMs: Math.round((el.duration || 0) * 1000) });
+      _afterUtterance(); return;
+    }
     _serverTtsFails++;
     dbg('fail', reason || '', 'fails=' + _serverTtsFails);
+    _debuglogPush('tts-fail', { seq: _seq, text, reason: reason || '', sinceStartMs: _since, fails: _serverTtsFails });
     if (_ttsDebug && reason) toast('TTS调试: ' + reason);
     if (_serverTtsFails >= 3) {
       _serverTtsDown = true;   // 本局降级：后续播报直接走本地兜底/文字，不再每条都重试 3 次网络（移动端避免无谓等待）
@@ -1367,6 +1402,8 @@ function _speakServer(text, fallback) {
   // 过滤 Bonto 冷启动偶发返回的 HTML 抖动——最多重试 3 次（退避）避开抖动，避免单条 HTML 就让整局 TTS 降级。
   // （关键：之前“非音频即判失败”会让一次 HTML 抖动直接累加到 _serverTtsFails，连续 3 次就误判服务端不可用。）
   let srcUrl = prefetched;
+  const t0 = Date.now();
+  if (!prefetched) _debuglogPush('tts-request-start', { seq: _ttsCurrentItem && _ttsCurrentItem.seq, text, fromCache: false });
   const loadSrc = async () => {
     if (srcUrl) return true;
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -1375,10 +1412,18 @@ function _speakServer(text, fallback) {
         const ct = resp.headers.get('content-type') || '';
         if (resp.ok && /audio\/wav/.test(ct)) {
           const blob = await resp.blob();
-          if (blob && blob.size) { srcUrl = URL.createObjectURL(blob); return true; }
+          if (blob && blob.size) {
+            srcUrl = URL.createObjectURL(blob);
+            _debuglogPush('tts-response-ok', { seq: _ttsCurrentItem && _ttsCurrentItem.seq, text, ms: Date.now() - t0, size: blob.size, attempt, serverMs: resp.headers.get('X-TTS-Ms') || '', cache: resp.headers.get('X-TTS-Cache') || '' });
+            return true;
+          }
         }
+        _debuglogPush('tts-response-bad', { seq: _ttsCurrentItem && _ttsCurrentItem.seq, text, ms: Date.now() - t0, status: resp.status, contentType: ct, attempt });
         dbg('tts 非音频响应', resp.status, ct, 'attempt=' + attempt);
-      } catch (e) { dbg('tts fetch 异常', e && e.message); }
+      } catch (e) {
+        _debuglogPush('tts-fetch-error', { seq: _ttsCurrentItem && _ttsCurrentItem.seq, text, ms: Date.now() - t0, attempt, error: String(e && e.message || e) });
+        dbg('tts fetch 异常', e && e.message);
+      }
       if (attempt < 2) await wait(250 * (attempt + 1));
     }
     return false;
@@ -1389,9 +1434,12 @@ function _speakServer(text, fallback) {
     // 取消上一条可能残留的加载/播放，避免串台
     try { el.pause(); } catch (_) {}
     el.src = srcUrl;
+    // 出声时刻：onplaying 是「音频真正开始输出」的信号，晚于 play() 调用
+    el.onplaying = () => { _debuglogPush('tts-playing', { seq: _ttsCurrentItem && _ttsCurrentItem.seq, text, sinceStartMs: Date.now() - t0, fromCache: !!prefetched }); };
     let tries = 0;
     const tryPlay = () => {
       if (mySeq !== _serverAudioSeq) return;
+      _debuglogPush('tts-play-call', { seq: _ttsCurrentItem && _ttsCurrentItem.seq, text, tries, sinceStartMs: Date.now() - t0 });
       const p = el.play();
       if (!p || !p.catch) return; // 老浏览器无 promise：靠 onended/onerror
       p.catch((e) => {
@@ -1421,6 +1469,7 @@ function _afterUtterance() {
   _ttsDraining = false;
   if (_ttsTotalWatchdog) { clearTimeout(_ttsTotalWatchdog); _ttsTotalWatchdog = null; }
   _debuglogPush('after-utterance', { seq: finished && finished.seq, text: finished && finished.text, kind: finished && finished.kind, remaining: _ttsQueue.length });
+  _ttsLastEndAt = Date.now();
   // 当前播完的是某角色的「闭眼」播报 → 通知服务端推进下一位 / 进入白天（音文同步的关键）
   if (finished && finished.kind === 'close') { if (_nightAckFallback) { clearTimeout(_nightAckFallback); _nightAckFallback = null; } sendNightAck(); }
   setTimeout(_ttsDrain, 120);

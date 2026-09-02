@@ -272,7 +272,7 @@ function announce(room, text, step, kind, stage, meta) {
   if (room.warmedTexts && (kind === 'open' || kind === 'close' || kind === 'stage') && !room.warmedTexts.has(text)) {
     console.warn('[tts] 播报未预热（需现合成，间隔会变长）: ' + JSON.stringify(text.slice(0, 24)));
   }
-  const payload = { text, step: step || 0, kind: kind || null, stage: stage || null };
+  const payload = { text, step: step || 0, kind: kind || null, stage: stage || null, serverTs: Date.now() };
   if (meta) Object.assign(payload, meta);
   // 播报权威日志：每条自增 seq，随 state 全量下发（客户端按 seq 幂等补齐，漏收/重连也能补全记录）
   const seq = ++room.annSeq;
@@ -421,6 +421,11 @@ function voiceBroadcast(room) {
 
 // 推送个性化状态给每位玩家
 function pushState(room) {
+  // 阶段切换时刻：只在变化时记一条，避免污染日志，又能标出 night→day→result 的分界
+  if (room.phase !== room._loggedPhase) {
+    debugLog('phase-change', { room: room.code, from: room._loggedPhase || '', to: room.phase, annSeq: room.annSeq });
+    room._loggedPhase = room.phase;
+  }
   for (const c of room.sse) {
     const p = findPlayer(room, c.token);
     if (!p) continue;
