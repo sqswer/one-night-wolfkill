@@ -20,6 +20,8 @@ let STATE = {
 let ttsOn = true;
 let actionSel = {};
 let es = null;
+let _sseErrCount = 0;        // SSE 连续错误计数（Bonto 冷启动偶发返回 HTML 而非事件流时，用于强制重建连接）
+let _sseRecreating = false;     // 防止重建重入
 let micRec = null;
 let recording = false;
 
@@ -79,10 +81,34 @@ function showScreen(name) {
   $$('.screen').forEach(s => s.classList.remove('active'));
   $('#screen-' + name).classList.add('active');
 }
-async function api(path, body) {
-  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
-  let j = null; try { j = await r.json(); } catch (_) {}
-  return { ok: r.ok, status: r.status, data: j };
+const wait = (ms) => new Promise(r => setTimeout(r, ms));
+async function api(path, body, opts) {
+  // Bonto 平台层偶发“冷启动/休眠抖动”：请求落到唤醒中的实例时返回 HTML 加载页而非应用 JSON/音频。
+  // 这类瞬时故障对 /api/action（开局/准备/夜行动作/nightAck）是致命的——动作静默丢失会导致夜晚卡死。
+  // 故对 HTML 响应 / 5xx / 网络异常做退避重试；真实业务 4xx（如“房间不存在”）不重试，直接返回。
+  const retries = (opts && opts.retries != null) ? opts.retries : 3;
+  let last = { ok: false, status: 0, data: null };
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+      const txt = await r.text();
+      const isHtml = /^\s*<!doctype|<html[\s>]/i.test(txt);
+      if (r.ok && !isHtml) {
+        let j = null; try { j = JSON.parse(txt); } catch (_) {}
+        return { ok: true, status: r.status, data: j };
+      }
+      if (!isHtml && r.status >= 400 && r.status < 500) {  // 真实业务错误：立即返回，不重试
+        let j = null; try { j = JSON.parse(txt); } catch (_) {}
+        return { ok: false, status: r.status, data: j };
+      }
+      last = { ok: false, status: r.status, html: isHtml, data: null };
+      if (i < retries) { await wait(Math.min(700, 150 * (i + 1))); continue; }
+    } catch (e) {
+      last = { ok: false, status: 0, error: String((e && e.message) || e) };
+      if (i < retries) { await wait(Math.min(700, 150 * (i + 1))); continue; }
+    }
+  }
+  return last;
 }
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 function initial(name) { return (name || '?').slice(0, 1); }
@@ -121,9 +147,19 @@ function saveLocal() {
 function connectSSE() {
   if (es) es.close();
   es = new EventSource(`/api/stream?code=${encodeURIComponent(STATE.code)}&token=${encodeURIComponent(STATE.token)}`);
-  es.onopen = () => $('#conn-dot').classList.add('on');
-  es.onerror = () => $('#conn-dot').classList.remove('on');
-  es.addEventListener('state', (e) => { onState(JSON.parse(e.data)); });
+  es.onopen = () => { $('#conn-dot').classList.add('on'); _sseErrCount = 0; };
+  es.onerror = () => {
+    $('#conn-dot').classList.remove('on');
+    _sseErrCount++;
+    // Bonto 冷启动偶发返回 HTML 而非事件流：EventSource 默认会自愈重连，但若拿到的是一条不关闭的
+    // stuck HTML 连接则永不触发 onerror，整页会卡在加载/收不到播报。连续 3 次错误后强制重建一次连接，
+    // 重新请求事件流，绕过抖动的实例。
+    if (_sseErrCount >= 3 && !_sseRecreating) {
+      _sseRecreating = true;
+      setTimeout(() => { _sseRecreating = false; _sseErrCount = 0; connectSSE(); }, 400);
+    }
+  };
+  es.addEventListener('state', (e) => { _sseErrCount = 0; onState(JSON.parse(e.data)); });
   es.addEventListener('reset', () => {
     // 新一局开始：清空播报历史与语音队列/去重，必须在开场播报之前完成
     _ttsSeq++;                   // 作废在途的 onend/finish
@@ -908,7 +944,12 @@ function _ttsPrefetch(text) {
   if (!text || _ttsAudioCache.has(text) || _ttsPrefetching.has(text)) return;
   _ttsPrefetching.add(text);
   fetch('/api/tts?text=' + encodeURIComponent(text))
-    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+    .then(r => {
+      // 校验 content-type：Bonto 冷启动可能返回 HTML 加载页（200 text/html），绝不能当音频缓存
+      const ct = r.headers.get('content-type') || '';
+      if (!r.ok || !/audio\/wav/.test(ct)) throw new Error('非音频响应 ' + r.status + ' ' + ct);
+      return r.blob();
+    })
     .then(b => {
       if (!b || !b.size) throw new Error('empty audio');
       _ttsAudioCache.set(text, URL.createObjectURL(b));
@@ -919,7 +960,7 @@ function _ttsPrefetch(text) {
         _ttsAudioCache.delete(oldest);
       }
     })
-    .catch(() => {})                       // 预取失败无所谓：正式播放时会自己再拉一次
+    .catch(() => {})                       // 预取失败（含 HTML 抖动）无所谓：正式播放时会自己再校验拉取
     .then(() => { _ttsPrefetching.delete(text); });
 }
 // 预取队首（即下一条要播的）
@@ -1226,9 +1267,9 @@ function _speakOne(text) {
  *  play() 被自动播放策略拒绝时：若尚未解锁，则挂到下一次用户手势再播；已解锁仍失败才回退文字，
  *  且回退时通过 _afterUtterance 推进，避免文本抢跑（若音频实际已在播，正常等 onended 推进）。 */
 function _speakServer(text, fallback) {
-  // 命中预取缓存时直接用本地 Blob 地址，省掉一次网络往返
+  // 命中预取缓存时直接用本地 Blob 地址（预取时已校验过 content-type），省掉一次网络往返
   const prefetched = _ttsAudioCache.get(text) || null;
-  const u = prefetched || ('/api/tts?text=' + encodeURIComponent(text));
+  const url = prefetched || ('/api/tts?text=' + encodeURIComponent(text));
   if (!_serverAudioEl) { _serverAudioEl = new Audio(); _serverAudioEl.preload = 'auto'; }
   const el = _serverAudioEl;
   const mySeq = ++_serverAudioSeq;   // 当前这条的序号：上一条迟到的 onended/error 会被屏蔽，不会误关/误推进
@@ -1261,31 +1302,55 @@ function _speakServer(text, fallback) {
     const code = el.error && el.error.code;
     finish(false, 'audio.error code=' + code);
   };
-  // 取消上一条可能残留的加载/播放，避免串台
-  try { el.pause(); } catch (_) {}
-  el.src = u;
-  let tries = 0;
-  const tryPlay = () => {
-    if (mySeq !== _serverAudioSeq) return;
-    const p = el.play();
-    if (!p || !p.catch) return; // 老浏览器无 promise：靠 onended/onerror
-    p.catch((e) => {
-      tries++;
-      dbg('play rejected', e && e.name || e, 'tries=' + tries);
-      if (tries < 3) { setTimeout(tryPlay, 200 * tries); return; }   // 退避重试，规避偶发自动播放拒绝
-      // 仍被拒：若尚未解锁，挂到下一次用户手势再播本条（不立即推进文本），但最多等 2s，超时则降级文字推进
-      if (!_audioUnlocked) {
-        _unlockAudio();
-        const onTouch = () => { document.removeEventListener('touchstart', onTouch); document.removeEventListener('click', onTouch); _unlockAudio(); tryPlay(0); };
-        document.addEventListener('touchstart', onTouch, { once: true, passive: true });
-        document.addEventListener('click', onTouch, { once: true });
-        setTimeout(() => { if (mySeq === _serverAudioSeq) finish(false, 'unlock timeout'); }, 2000);
-        return;
-      }
-      finish(false, 'play rejected');
-    });
+  // 取得可播放的音频源：预取命中直接用；否则 fetch 并校验 content-type 为 audio/wav，
+  // 过滤 Bonto 冷启动偶发返回的 HTML 抖动——最多重试 3 次（退避）避开抖动，避免单条 HTML 就让整局 TTS 降级。
+  // （关键：之前“非音频即判失败”会让一次 HTML 抖动直接累加到 _serverTtsFails，连续 3 次就误判服务端不可用。）
+  let srcUrl = prefetched;
+  const loadSrc = async () => {
+    if (srcUrl) return true;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const resp = await fetch(url);
+        const ct = resp.headers.get('content-type') || '';
+        if (resp.ok && /audio\/wav/.test(ct)) {
+          const blob = await resp.blob();
+          if (blob && blob.size) { srcUrl = URL.createObjectURL(blob); return true; }
+        }
+        dbg('tts 非音频响应', resp.status, ct, 'attempt=' + attempt);
+      } catch (e) { dbg('tts fetch 异常', e && e.message); }
+      if (attempt < 2) await wait(250 * (attempt + 1));
+    }
+    return false;
   };
-  tryPlay(0);
+  loadSrc().then((ok) => {
+    if (mySeq !== _serverAudioSeq) return;
+    if (!ok) { finish(false, 'tts 非音频/不可达（疑似 Bonto 冷启动抖动）'); return; }
+    // 取消上一条可能残留的加载/播放，避免串台
+    try { el.pause(); } catch (_) {}
+    el.src = srcUrl;
+    let tries = 0;
+    const tryPlay = () => {
+      if (mySeq !== _serverAudioSeq) return;
+      const p = el.play();
+      if (!p || !p.catch) return; // 老浏览器无 promise：靠 onended/onerror
+      p.catch((e) => {
+        tries++;
+        dbg('play rejected', e && e.name || e, 'tries=' + tries);
+        if (tries < 3) { setTimeout(tryPlay, 200 * tries); return; }   // 退避重试，规避偶发自动播放拒绝
+        // 仍被拒：若尚未解锁，挂到下一次用户手势再播本条（不立即推进文本），但最多等 2s，超时则降级文字推进
+        if (!_audioUnlocked) {
+          _unlockAudio();
+          const onTouch = () => { document.removeEventListener('touchstart', onTouch); document.removeEventListener('click', onTouch); _unlockAudio(); tryPlay(0); };
+          document.addEventListener('touchstart', onTouch, { once: true, passive: true });
+          document.addEventListener('click', onTouch, { once: true });
+          setTimeout(() => { if (mySeq === _serverAudioSeq) finish(false, 'unlock timeout'); }, 2000);
+          return;
+        }
+        finish(false, 'play rejected');
+      });
+    };
+    tryPlay(0);
+  });
 }
 
 /** 一条朗读结束（onend/onerror/看门狗）后推进到下一条 */
