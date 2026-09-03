@@ -10,6 +10,9 @@
 //   想临时回退 Piper：设环境变量 TTS_PROVIDER=piper 后重启（不用删文件）；
 //   想彻底卸载 MeloTTS：删掉 tts-bin/ 下的 sherpa-onnx-offline-tts(.exe)
 //   与 vits-melo-tts-zh_en 目录即可，服务会自动回到 Piper。
+//
+// 国内/受限网络：下载自动尝试「直连 GitHub → ghproxy.net 代理 → mirror.ghproxy.com 代理」
+// 三个源，任一可用即止，解决 Bonto 等容器直连 GitHub release 超时/被墙的问题。
 
 const fs = require('fs');
 const path = require('path');
@@ -50,39 +53,69 @@ function sherpaAsset() {
   return `${base}-linux-x64-shared.tar.bz2`;
 }
 
-function download(url, dest) {
+// 国内可访问的 GitHub 代理前缀：解决容器/国内服务器直连 GitHub release 受限。
+// 顺序即回退顺序，任一可用即止。
+function withProxy(u) {
+  const bare = u.replace(/^https:\/\//, '');
+  return [u, 'https://ghproxy.net/' + bare, 'https://mirror.ghproxy.com/' + bare];
+}
+function sherpaUrls() { return withProxy(`${GH}/v${SHERPA_VER}/${sherpaAsset()}`); }
+function modelUrls() { return withProxy(MODEL_URL); }
+
+// 单源下载（带超时 + 重定向跟随）。失败抛错，由 download() 切到下一源。
+function fetchOnce(url, dest, timeoutMs = 180000) {
   return new Promise((resolve, reject) => {
-    console.log('下载:', url);
     const f = fs.createWriteStream(dest);
-    const get = (u) => https.get(u, res => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        f.close(); try { fs.unlinkSync(dest); } catch (_) {}
-        return get(res.headers.location);
-      }
-      if (res.statusCode !== 200) {
-        f.close(); try { fs.unlinkSync(dest); } catch (_) {}
-        return reject(new Error('HTTP ' + res.statusCode + ' for ' + u));
-      }
-      const total = Number(res.headers['content-length']) || 0;
-      let got = 0, lastPct = -1;
-      res.on('data', d => {
-        got += d.length;
-        if (total) {
-          const pct = Math.floor((got / total) * 100);
-          if (pct !== lastPct && pct % 10 === 0) {
-            lastPct = pct;
-            process.stdout.write(`\r  已下载 ${pct}% (${(got / 1048576).toFixed(1)}MB)`);
-          }
+    const get = (u) => {
+      const req = https.get(u, { timeout: timeoutMs }, res => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          f.close(); try { fs.unlinkSync(dest); } catch (_) {}
+          return get(new URL(res.headers.location, u).href);
         }
+        if (res.statusCode !== 200) {
+          f.close(); try { fs.unlinkSync(dest); } catch (_) {}
+          return reject(new Error('HTTP ' + res.statusCode + ' for ' + u));
+        }
+        const total = Number(res.headers['content-length']) || 0;
+        let got = 0, lastPct = -1;
+        res.on('data', d => {
+          got += d.length;
+          if (total) {
+            const pct = Math.floor((got / total) * 100);
+            if (pct !== lastPct && pct % 10 === 0) {
+              lastPct = pct;
+              process.stdout.write(`\r  已下载 ${pct}% (${(got / 1048576).toFixed(1)}MB)`);
+            }
+          }
+        });
+        res.pipe(f);
+        f.on('finish', () => {
+          if (total) process.stdout.write(`\r  已下载 100% (${(got / 1048576).toFixed(1)}MB)\n`);
+          f.close(() => resolve(dest));
+        });
       });
-      res.pipe(f);
-      f.on('finish', () => {
-        if (total) process.stdout.write(`\r  已下载 100% (${(got / 1048576).toFixed(1)}MB)\n`);
-        f.close(() => resolve(dest));
-      });
-    }).on('error', e => { try { fs.unlinkSync(dest); } catch (_) {} reject(e); });
+      req.on('timeout', () => { req.destroy(new Error('下载超时')); });
+      req.on('error', e => { try { fs.unlinkSync(dest); } catch (_) {} reject(e); });
+    };
     get(url);
   });
+}
+
+// 多源回退：依次尝试，任一成功即止；全失败才抛错。
+async function download(urls, dest) {
+  let lastErr;
+  for (let i = 0; i < urls.length; i++) {
+    try {
+      console.log(`下载源 ${i + 1}/${urls.length}: ${urls[i]}`);
+      await fetchOnce(urls[i], dest);
+      return;
+    } catch (e) {
+      lastErr = e;
+      console.warn('  ⚠️ 源 ' + (i + 1) + ' 失败: ' + e.message + '，尝试下一个');
+      try { fs.unlinkSync(dest); } catch (_) {}
+    }
+  }
+  throw new Error('所有下载源均失败: ' + (lastErr && lastErr.message));
 }
 
 function extract(archive, destDir) {
@@ -129,9 +162,8 @@ function _flattenSherpa(dir) {
     if (fs.existsSync(binPath) && !FORCE) {
       console.log('✓ sherpa-onnx 二进制已存在，跳过（如需重装加 --force）');
     } else {
-      const url = sherpaAsset();
       const archive = path.join(OUT, '_sherpa_dl.tar.bz2');
-      await download(url, archive);
+      await download(sherpaUrls(), archive);
       // 校验确实是 bzip2（前 3 字节 'BZh'），否则多半下到了错误页
       const magic = fs.readFileSync(archive, { start: 0, end: 3 });
       if (!(magic[0] === 0x42 && magic[1] === 0x5a && magic[2] === 0x68)) {
@@ -153,7 +185,7 @@ function _flattenSherpa(dir) {
       console.log('✓ MeloTTS 模型已存在，跳过（如需重装加 --force）');
     } else {
       const archive = path.join(OUT, '_melo_model_dl.tar.bz2');
-      await download(MODEL_URL, archive);
+      await download(modelUrls(), archive);
       const magic = fs.readFileSync(archive, { start: 0, end: 3 });
       if (!(magic[0] === 0x42 && magic[1] === 0x5a && magic[2] === 0x68)) {
         const peek = fs.readFileSync(archive, 'utf8').slice(0, 200).replace(/\s+/g, ' ');
@@ -182,10 +214,10 @@ function _flattenSherpa(dir) {
     console.log('   想对比/回退 Piper：设环境变量 TTS_PROVIDER=piper 后重启。');
   } catch (e) {
     console.error('\n❌ 安装失败:', e.message);
-    console.error('若网络无法访问 GitHub，请手动下载以下文件并放到 tts-bin/：');
-    console.error('  二进制:', sherpaAsset());
+    console.error('若所有下载源均不可达，请手动下载以下任一源并放到 tts-bin/：');
+    sherpaUrls().forEach(u => console.error('  二进制: ' + u));
     console.error('          （解压后把 bin/ 的可执行文件与 lib/ 的动态库都平铺到 tts-bin/ 根目录）');
-    console.error('  模型  :', MODEL_URL);
+    modelUrls().forEach(u => console.error('  模型  : ' + u));
     console.error('          （解压后应得到 tts-bin/' + MODEL + '/，内含 model.onnx / lexicon.txt / tokens.txt）');
     process.exit(1);
   }
