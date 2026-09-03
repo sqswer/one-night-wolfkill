@@ -125,6 +125,14 @@ async function run() {
     while ((idx = buf.indexOf('\n\n')) >= 0) {
       const raw = buf.slice(0, idx); buf = buf.slice(idx + 2);
       const m = /event:\s*(\S+)/.exec(raw); const dm = /data:\s*(.+)/.exec(raw);
+      if (m && dm && m[1] === 'speak') {
+        // 夜晚推进由客户端回执驱动（与真实客户端一致）：收到「闭眼」播报后回 nightAck。
+        // 服务端现在只要有客户端在线就一直续等回执（不再 8s 抢跑），脚本客户端不回执会拖到硬上限，非常慢。
+        try {
+          const sp = JSON.parse(dm[1]);
+          if (sp.kind === 'close') api('/api/action', { token, type: 'nightAck', payload: { seq: sp.seq } }).catch(() => {});
+        } catch (_) {}
+      }
       if (m && dm && m[1] === 'state') {
         try { const s = JSON.parse(dm[1]); await onState(s); } catch (_) {}
         if (resultSummary) { done = true; break; }

@@ -1106,21 +1106,35 @@ let _ttsWarned = false;
   window.addEventListener(ev, unlockTTS, { once: true, passive: true })
 );
 
-/** 播报补齐（补发通道）：断线重连 / 刷新页面 / SSE 漏收后，用服务端权威日志把缺失的播报记录补回来。
- *  只补文字与界面进度，不补声音、也不补发 nightAck——避免重连瞬间一口气念一堆、或误推进夜晚。
- *  最后一条按实时处理（该念的还是要念），其余仅补记录。 */
+// 补发通道最多「补念出声」的条数：断线一两秒漏掉 1~3 条时逐条补念，音文严格同序；
+// 中途加入 / 整晚刷新这种一次补几十条的场景，更早的条目只补文字记录，避免一口气把整晚从头重念一遍。
+const REPLAY_SOUND_LIMIT = 3;
+/** 播报补齐（补发通道）：断线重连 / 刷新页面 / SSE 漏收后，用服务端权威日志把缺失的播报补回来。
+ *  ⚠️ 补念必须走「入队 + 出声 + 展示」同一路径（与实时通道 speakAnnouncement 一致），不能只落文字。
+ *  旧实现只 showAnnItem 不出声，漏掉的条目「文字一闪而过、没有声音」，
+ *  与正在播放的最新一条形成音文错位（用户反馈的「播报顺序乱了 / 文本抢到语音前面」）。
+ *  不在这里单独发 nightAck：闭眼回执由 _ttsDrain 出队播完时统一处理，避免补发误推进夜晚。 */
 function syncAnnLog(log) {
   if (!log || !log.length) return;
-  const lastSeq = log[log.length - 1].seq;
-  let pushed = 0;
+  const pending = [];
   for (const it of log) {
-    if (it.seq <= _lastAnnSeq) continue;
-    if (it.seq === lastSeq) { speakAnnouncement(it); pushed++; continue; }   // 最新一条：正常走语音流程
+    if (!it || !it.text) continue;
+    if (typeof it.seq === 'number' && it.seq <= _lastAnnSeq) continue;
+    // 先占位再处理：与实时通道共用一套 seq 幂等，避免同一条被两个通道各处理一次（历史 Bug：补发条目被吞）
     if (!claimAnnouncement(it)) continue;
-    replayAnnouncement(it);
-    pushed++;
+    pending.push({ seq: (typeof it.seq === 'number' ? it.seq : 0), text: it.text, step: it.step || 0, kind: it.kind || null, stage: it.stage || null, roleName: it.roleName || null });
   }
-  _debuglogPush('sync-annlog', { received: log.length, pushed, headSeq: log[0].seq, lastSeq, lastSeenSeq: _lastAnnSeq });
+  if (!pending.length) return;
+  const soundFrom = Math.max(0, pending.length - REPLAY_SOUND_LIMIT);
+  pending.forEach((item, i) => {
+    if (i >= soundFrom && ttsOn) _replayWithSound(item);   // 最近几条：补念出声 + 文字跟随语音
+    else showAnnItem(item);                                // 更早的：只补记录，不回头念
+  });
+  _debuglogPush('sync-annlog', {
+    received: log.length, pushed: pending.length,
+    spoken: (ttsOn ? pending.length - soundFrom : 0),
+    headSeq: pending[0].seq, lastSeq: pending[pending.length - 1].seq, lastSeenSeq: _lastAnnSeq,
+  });
 }
 
 /** 播报幂等去重：以服务端自增 seq 为准（三条通道 speak / state.annLog 只会生效一次）。
@@ -1148,7 +1162,7 @@ function speakAnnouncement(d) {
   // 注意这里【不入队】——否则用户中途再打开语音时，积压的旧条目会被整批重播，造成严重的音文错位。
   if (!ttsOn) {
     showAnnItem(item);
-    if (item.kind === 'close') sendNightAck();
+    if (item.kind === 'close') sendNightAck(item.seq);
     return;
   }
   // 上帝视角：顺序入队（携带 seq / 步数 / 类型 / 阶段 / 角色名），由 _ttsDrain 逐条完整朗读。
@@ -1183,14 +1197,21 @@ function speakAnnouncement(d) {
   if (!_ttsDraining) _ttsDrain();
 }
 
-/** 补发通道专用：只把这条播报落到文字记录与界面进度，不发声、不回执 */
-function replayAnnouncement(d) {
-  showAnnItem(d);
+/** 补发条目入队朗读（已由 syncAnnLog 占过 seq 幂等，此处不再 claim，避免二次占位把条目吞掉） */
+function _replayWithSound(item) {
+  _ttsQueue.push(item);
+  _ttsQueue.sort((a, b) => (a.seq || 1e15) - (b.seq || 1e15));   // 与实时通道合流后仍按服务端 seq 有序
+  _debuglogPush('replay-pushed', { seq: item.seq, text: item.text, kind: item.kind, stage: item.stage, queueLen: _ttsQueue.length });
+  if (!_ttsDraining) _ttsDrain();
 }
 
-/** 通知服务端：当前角色的「闭眼」播报已播完，可推进到下一位 / 进入白天（音文同步节奏） */
-function sendNightAck() {
-  if (STATE.token) api('/api/action', { token: STATE.token, type: 'nightAck', payload: {} }).catch(() => {});
+/** 通知服务端：当前角色的「闭眼」播报已播完，可推进到下一位 / 进入白天（音文同步节奏）
+ *  ⚠️ 必须带上本条播报的 seq：补发通道里可能还在念断线期间漏掉的旧条目，那条念完也会发一次回执，
+ *  服务端靠 seq 判定「是不是本条」，否则会被旧回执误推进（重新造成音文错位）。 */
+function sendNightAck(seq) {
+  const payload = {};
+  if (typeof seq === 'number' && seq > 0) payload.seq = seq;
+  if (STATE.token) api('/api/action', { token: STATE.token, type: 'nightAck', payload }).catch(() => {});
 }
 
 /** 添加一条播报历史 */
@@ -1288,7 +1309,7 @@ function _ttsDrain() {
   // 避免个别浏览器/WebView 的 speechSynthesis.onend 不触发导致夜晚永久卡在「闭眼」。
   if (item.kind === 'close') {
     if (_nightAckFallback) clearTimeout(_nightAckFallback);
-    _nightAckFallback = setTimeout(() => { sendNightAck(); }, 4500);
+    _nightAckFallback = setTimeout(() => { sendNightAck(item.seq); }, 4500);
   }
   // 总看门狗：本条「开始播放 → 推进下一条」的整体兜底，覆盖所有失效路径——
   // 服务端 /api/tts 请求挂起、<audio> 既不 onended 也不 onerror、本地 speechSynthesis 静默失败等。
@@ -1476,7 +1497,7 @@ function _afterUtterance() {
   _debuglogPush('after-utterance', { seq: finished && finished.seq, text: finished && finished.text, kind: finished && finished.kind, remaining: _ttsQueue.length });
   _ttsLastEndAt = Date.now();
   // 当前播完的是某角色的「闭眼」播报 → 通知服务端推进下一位 / 进入白天（音文同步的关键）
-  if (finished && finished.kind === 'close') { if (_nightAckFallback) { clearTimeout(_nightAckFallback); _nightAckFallback = null; } sendNightAck(); }
+  if (finished && finished.kind === 'close') { if (_nightAckFallback) { clearTimeout(_nightAckFallback); _nightAckFallback = null; } sendNightAck(finished.seq); }
   setTimeout(_ttsDrain, 120);
 }
 

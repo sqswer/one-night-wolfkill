@@ -1,0 +1,13 @@
+# 排除本地大文件/无关文件，避免进镜像、保证镜像由 install 逻辑拉取依赖
+node_modules
+.git
+.workbuddy
+tts-bin
+tts-cache
+logs
+_tmp
+运营
+新头像配图
+*.log
+Dockerfile
+.dockerignore

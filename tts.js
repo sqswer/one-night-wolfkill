@@ -1,7 +1,11 @@
 'use strict';
 // 服务端 TTS 模块（零依赖外壳）。
-// 语音源：piper —— 本地自托管 Piper TTS（MIT 协议，完全免费、无需 key、运行时零联网）。
-//   需先准备好二进制+模型，见 scripts/install_piper.js。中文音质好、资源占用极低，推荐的内部部署方案。
+// 语音源（双引擎并存：默认优先 MeloTTS，缺失则自动回退 Piper）：
+//   melo  —— MeloTTS 经 sherpa-onnx 推理（CPU 实时、44100Hz，中文自然度与中英混读明显优于 Piper）。
+//            需额外装 sherpa-onnx 二进制 + 163MB 模型，见 scripts/install_melo.js。
+//   piper —— 本地自托管 Piper TTS（MIT 协议，完全免费、无需 key、运行时零联网，零依赖单二进制）。
+//            资源占用极低，见 scripts/install_piper.js；未装 MeloTTS 时自动使用它。
+// 两者共用同一套接口、串行队列与磁盘缓存（缓存 key 带 provider，切换引擎不会串味）。
 // 生成的音频按内容哈希落盘缓存（tts-cache/<hash>.wav），重复播报秒回、跨局复用，不重复占用空间。
 // 未配置可用的语音源时，available() 返回 false，调用方降级为纯文字，绝不抛错中断游戏。
 
@@ -16,7 +20,7 @@ const CACHE_DIR = path.join(__dirname, 'tts-cache');
 try {
   if (fs.existsSync(CACHE_DIR)) {
     for (const f of fs.readdirSync(CACHE_DIR)) {
-      if (f.startsWith('piper_') && f.endsWith('.wav')) {
+      if ((f.startsWith('piper_') || f.startsWith('melo_')) && f.endsWith('.wav')) {
         try { fs.unlinkSync(path.join(CACHE_DIR, f)); } catch (_) {}
       }
     }
@@ -152,15 +156,103 @@ function _synthesizePiper(text) {
   });
 }
 
-// ---- provider 自动判定（运行时动态解析，安装 tts-bin 后无需重启即生效）----
+// ---- MeloTTS（sherpa-onnx 推理）相关 ----
+// 音质优于 Piper（44100Hz、pypinyin/g2p 音素化更准、中英混读稳），代价是多一个引擎二进制
+// 与 163MB 模型。未安装时 _meloPresent() 为 false，自动回退 Piper，零依赖部署不受影响。
+function _meloBin() {
+  return process.env.SHERPA_BIN || path.join(__dirname, 'tts-bin', 'sherpa-onnx-offline-tts' + (process.platform === 'win32' ? '.exe' : ''));
+}
+function _meloDir() {
+  return process.env.MELO_MODEL_DIR || path.join(__dirname, 'tts-bin', 'vits-melo-tts-zh_en');
+}
+function _meloPresent() {
+  try {
+    const dir = _meloDir();
+    return fs.existsSync(_meloBin())
+      && fs.existsSync(path.join(dir, 'model.onnx'))
+      && fs.existsSync(path.join(dir, 'lexicon.txt'))
+      && fs.existsSync(path.join(dir, 'tokens.txt'));
+  } catch (_) { return false; }
+}
+
+// MeloTTS 自带 g2p 与数字/日期规则（date.fst / number.fst），中文标点交给它自己断句，
+// 因此只做最小归一化（去【】、补句末句号），不像 Piper 那样插空格、拆长句。
+function normalizeForMelo(text) {
+  let s = String(text == null ? '' : text).trim();
+  if (!s) return '';
+  s = s.replace(/【([^】]*)】/g, (_m, inner) => ' ' + inner + ' ');   // 去掉【】并留停顿
+  s = s.replace(/\s+/g, ' ').trim();
+  if (!/[。！？…]$/.test(s)) s += '。';                              // 句末补句号，保证降调
+  return s;
+}
+
+function _synthesizeMelo(text) {
+  return new Promise((resolve, reject) => {
+    const bin = _meloBin(), dir = _meloDir();
+    const binDir = path.dirname(bin);
+    _ensureDirSync();
+    const tmp = path.join(CACHE_DIR, 'melo_' + crypto.randomBytes(8).toString('hex') + '.wav');
+    const args = [
+      '--vits-model=' + path.join(dir, 'model.onnx'),
+      '--vits-lexicon=' + path.join(dir, 'lexicon.txt'),
+      '--vits-tokens=' + path.join(dir, 'tokens.txt'),
+    ];
+    // 数字/日期读法规则（可选：装了就加，缺了不影响基本合成）
+    const dateFst = path.join(dir, 'date.fst'), numFst = path.join(dir, 'number.fst');
+    if (fs.existsSync(dateFst) && fs.existsSync(numFst)) args.push('--tts-rule-fsts=' + dateFst + ',' + numFst);
+    // speed <1 稍慢更清晰（对齐 Piper 侧 length_scale 1.08 的听感）；小容器固定 1 线程
+    const speed = (() => { const v = parseFloat(process.env.MELO_SPEED); return Number.isFinite(v) && v > 0 ? v : 0.95; })();
+    const threads = (() => { const v = parseInt(process.env.MELO_THREADS, 10); return Number.isFinite(v) && v > 0 ? v : 1; })();
+    args.push('--speed=' + speed);
+    args.push('--num-threads=' + threads);
+    args.push('--output-filename=' + tmp);
+    args.push(String(text));   // 注意：sherpa 的文本是最后一个位置参数，不是 stdin（与 Piper 不同）
+    // shared 版二进制依赖同目录的动态库，必须让动态库搜索路径包含它
+    const env = Object.assign({}, process.env, {
+      LD_LIBRARY_PATH: binDir + (process.env.LD_LIBRARY_PATH ? (':' + process.env.LD_LIBRARY_PATH) : ''),
+    });
+    let done = false;
+    const cleanup = () => { try { fs.unlinkSync(tmp); } catch (_) {} };
+    const finish = (err, buf) => {
+      if (done) return; done = true;
+      if (err) { cleanup(); return reject(err); }
+      resolve(buf);
+    };
+    const errChunks = [];
+    let cp;
+    try { cp = child_process.spawn(bin, args, { env }); } catch (e) { return finish(e); }
+    if (cp.stderr) cp.stderr.on('data', d => errChunks.push(d));
+    cp.on('error', e => finish(e));
+    cp.on('close', code => {
+      if (done) return;
+      if (code !== 0) {
+        const msg = Buffer.concat(errChunks).toString('utf8').trim() || ('sherpa-onnx 退出码 ' + code);
+        return finish(new Error(msg));
+      }
+      fs.promises.readFile(tmp).then(b => { cleanup(); finish(null, b); }).catch(e => finish(e));
+    });
+    // 163MB 模型在小容器上单条可能数秒，超时放宽到 60s（Piper 为 32s）
+    setTimeout(() => { try { cp.kill(); } catch (_) {} finish(new Error('MeloTTS 合成超时')); }, 60000);
+  });
+}
+
+// ---- provider 自动判定（运行时动态解析，装好文件后重启即生效）----
+// 双引擎并存：默认优先 melo（音质更好），缺失则回退 piper；
+// 可用 TTS_PROVIDER=melo|piper 强制指定，便于对比听感或排障。
 function _resolveProvider() {
-  return _piperPresent() ? 'piper' : '';
+  const forced = (process.env.TTS_PROVIDER || '').trim().toLowerCase();
+  if (forced === 'melo') return _meloPresent() ? 'melo' : '';
+  if (forced === 'piper') return _piperPresent() ? 'piper' : '';
+  if (_meloPresent()) return 'melo';
+  if (_piperPresent()) return 'piper';
+  return '';
 }
 const PROVIDER = (() => { try { return _resolveProvider() || 'none'; } catch (_) { return 'none'; } })();
 
 // ---- 公共接口 ----
 function available() {
-  return _resolveProvider() === 'piper';
+  const p = _resolveProvider();
+  return p === 'melo' || p === 'piper';
 }
 
 function contentType() {
@@ -168,7 +260,9 @@ function contentType() {
 }
 
 function _cacheKey(text) {
-  return crypto.createHash('sha1').update(text).digest('hex');
+  // key 必须带 provider：否则切换引擎后同一句话会命中旧引擎生成的缓存，
+  // 表现为「换了引擎但声音没变」。带 provider 后两套缓存并存，来回切换都能命中。
+  return crypto.createHash('sha1').update(_resolveProvider() + '|' + text).digest('hex');
 }
 
 // ---- 合成调度：全局串行 + 优先级 ----
@@ -220,8 +314,12 @@ async function _readCache(key) {
 }
 
 async function _synthNow(text) {
-  // 先做中文播报预处理（加停顿、补句末标点等），只影响送进 Piper 的文本，不改界面显示
-  const audio = await _synthesizePiper(normalizeForTTS(text));
+  // 两个引擎的文本归一化策略不同（Piper 需插空格/拆长句，MeloTTS 交给自带 g2p 断句），
+  // 按当前引擎选用。只影响送进引擎的文本，不改界面显示。
+  const useMelo = _resolveProvider() === 'melo';
+  const audio = useMelo
+    ? await _synthesizeMelo(normalizeForMelo(text))
+    : await _synthesizePiper(normalizeForTTS(text));
   try {
     await fs.promises.writeFile(_cachePath(_cacheKey(text)), audio);
   } catch (_) { /* 缓存写入失败不致命 */ }
@@ -261,4 +359,4 @@ async function warm(texts) {
 // 队列深度（诊断用：>0 说明有合成在排队，播报间隔会被拉长）
 function pending() { return _synthQueue.length + (_synthRunning ? 1 : 0); }
 
-module.exports = { synthesize, warm, pending, available, contentType, PROVIDER, normalizeForTTS };
+module.exports = { synthesize, warm, pending, available, contentType, PROVIDER, normalizeForTTS, normalizeForMelo };

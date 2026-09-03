@@ -70,8 +70,10 @@ const path = require('path');
 const crypto = require('crypto');
 const url = require('url');
 
-// 服务端 TTS（兜底语音）：本地无语音引擎的浏览器（如 via、小米自带浏览器）由服务端 Piper 合成音频后播放。
-// 仅依赖本地部署的 Piper 二进制+模型（见 scripts/install_piper.js），无需联网/无需 key；缺失时 available() 为 false，由客户端降级为纯文字，不中断游戏。
+// 服务端 TTS（兜底语音）：本地无语音引擎的浏览器（如 via、小米自带浏览器）由服务端合成音频后播放。
+// 双引擎并存（判定逻辑见 tts.js）：装了 MeloTTS 就优先用它（音质更好，见 scripts/install_melo.js），
+// 否则回退 Piper（零依赖单二进制，见 scripts/install_piper.js）；可用 TTS_PROVIDER=melo|piper 强制指定。
+// 两者均无需联网/无需 key；都缺失时 available() 为 false，由客户端降级为纯文字，不中断游戏。
 let _tts = null;
 try { _tts = require('./tts'); } catch (_) { _tts = null; }
 console.log('[tts] 模块加载:', _tts ? ('OK，provider=' + (_tts.PROVIDER || '?') + '，available=' + _tts.available()) : '失败(未启用)');
@@ -236,6 +238,7 @@ function makeRoom(hostName, capacity = 5) {
     qIndex: -1,
     currentAction: null,    // {role, stage, seats, submissions, needsInput}
     nightTimer: null,
+    nightPaused: null,      // 夜晚「全员掉线」时挂起的恢复函数（非空 = 夜晚暂停，等客户端重连再续跑）
     votes: {},              // seat -> targetSeat
     voteTargetsOpen: false,
     protectTarget: null,    // 保镖保护
@@ -291,7 +294,11 @@ function announce(room, text, step, kind, stage, meta) {
 // 夜间节奏由「客户端语音播报确认」驱动：服务端在播完某角色「闭眼」后不再用固定计时器硬推进，
 // 而是等待客户端确认该条已念完（nightAck）再进入下一位 / 进入白天，从而与语音/文字严格同步。
 // 兜底：超过 NIGHT_ACK_TIMEOUT 仍无确认（如全部客户端静音/出错/断线）则自动推进，避免夜晚卡死。
+// 注意：本值只是「单次轮询间隔」，holdNightAck 在仍有客户端连着时会不断续等，
+// 直到客户端播完长语音并发回 nightAck（或触及 NIGHT_ACK_MAX_WAIT 硬上限）才兜底推进。
 const NIGHT_ACK_TIMEOUT = Number(process.env.NIGHT_ACK_TIMEOUT) || 8000;
+// 夜晚等待 nightAck 的硬上限（毫秒）：连着但始终不回执（客户端真卡死）时，超过此值才强制推进，杜绝夜晚永久挂起。
+const NIGHT_ACK_MAX_WAIT = Number(process.env.NIGHT_ACK_MAX_WAIT) || 45000;
 // 夜晚默认停顿（毫秒）：
 // - NIGHT_CLOSE_PAUSE：每个角色「闭眼」播报念完后，到下一位「睁眼」之间的固定停顿（规则要求 2000ms）
 // - NIGHT_REVEAL_PAUSE：无输入角色「睁眼」后，给玩家看清/听完私有信息的停留时间（有输入角色不合此停顿）
@@ -305,6 +312,33 @@ function clearNightHold(room) {
 function safeAdvance(room, label) {
   try { advanceQueue(room); }
   catch (e) { console.error('[night] advanceQueue 异常(' + label + '):', e && e.stack || e); }
+}
+// 夜晚「全员掉线」→ 暂停而不是让服务端空跑（2026-09-03 修「播报顺序乱了 / 闭眼停顿远大于 2000ms」）
+// 旧行为：最后一位客户端一断，服务端立刻把夜间流程一路推进（爪牙/守夜人等直接 no-sse-clients 跳过播报回执），
+// 客户端重连后只能拿到滞后若干条的 annLog 去补发，于是「记录区先刷到守夜人、声音还在狼人」。
+// 新行为：无人在线时把「当前这一步的推进函数」挂起（同时清掉 hold 与计时器），等人重连再原地续跑，
+// 客户端因此不会积压补发条目，文本与语音始终同源同序。
+function nightPause(room, resume) {
+  clearNightHold(room);
+  if (room.nightTimer) { clearTimeout(room.nightTimer); room.nightTimer = null; }
+  room.nightPaused = resume || null;
+  debugLog('night-pause', { room: room.code, phase: room.phase, qIndex: room.qIndex, resumable: !!resume });
+}
+function nightResume(room) {
+  const fn = room.nightPaused;
+  if (!fn) return false;
+  room.nightPaused = null;
+  debugLog('night-resume', { room: room.code, phase: room.phase, qIndex: room.qIndex });
+  // 给客户端一点点时间先把 state / annLog 消化掉（补发入队），再让夜晚继续，避免续跑瞬间又产生积压
+  setTimeout(() => {
+    if (room.phase !== 'night' && room.phase !== 'dusk') return;   // 已被重开/结算，放弃续跑
+    try { fn(); } catch (e) { console.error('[night] 重连续跑异常:', e && e.stack || e); safeAdvance(room, 'resume'); }
+  }, 800);
+  return true;
+}
+// 是否应因「无人在线」而暂停夜晚
+function _nightShouldPause(room) {
+  return (room.phase === 'night' || room.phase === 'dusk') && room.sse.length === 0;
 }
 function holdNightAck(room, cb) {
   clearNightHold(room);
@@ -320,27 +354,64 @@ function holdNightAck(room, cb) {
     return;
   }
   if (expected.size > 1) console.log('[night] 等待 ' + expected.size + ' 位在线玩家确认本条播报完成');
-  room.nightHold = { cb, expected, acks: new Set() };
-  debugLog('night-hold-start', { room: room.code, expected: [...expected].map(t => t.slice(0, 6)), timeoutMs: NIGHT_ACK_TIMEOUT });
-  room.nightHoldTimer = setTimeout(() => {
-    const got = room.nightHold ? [...room.nightHold.acks].map(t => t.slice(0, 6)) : [];
-    const miss = room.nightHold ? [...room.nightHold.expected].filter(t => !room.nightHold.acks.has(t)).map(t => t.slice(0, 6)) : [];
-    console.warn('[night] 超时兜底推进（仍有玩家未确认，已等待 ' + NIGHT_ACK_TIMEOUT + 'ms）');
-    debugLog('night-hold-timeout', { room: room.code, waitedMs: NIGHT_ACK_TIMEOUT, acked: got, missing: miss });
-    room.nightHold = null;
-    try { cb(); } catch (e) { console.error('[night] 超时推进异常:', e && e.stack || e); safeAdvance(room, 'timeout'); }
-  }, NIGHT_ACK_TIMEOUT);
+  const startedAt = Date.now();
+  const h = { cb, expected, acks: new Set(), startedAt, renewed: 0, seq: room.annSeq };
+  room.nightHold = h;
+  debugLog('night-hold-start', { room: room.code, expected: [...expected].map(t => t.slice(0, 6)), sliceMs: NIGHT_ACK_TIMEOUT, maxWaitMs: NIGHT_ACK_MAX_WAIT });
+  const fire = (reason, extra) => {
+    const cbk = h.cb;
+    clearNightHold(room);
+    debugLog('night-hold-fire', Object.assign({ room: room.code, reason, waitedMs: Date.now() - startedAt }, extra || {}));
+    try { cbk(); } catch (e) { console.error('[night] 推进异常(' + reason + '):', e && e.stack || e); safeAdvance(room, reason); }
+  };
+  const arm = () => {
+    const waited = Date.now() - startedAt;
+    const slice = Math.min(NIGHT_ACK_TIMEOUT, Math.max(0, NIGHT_ACK_MAX_WAIT - waited));
+    const missing = () => [...h.expected].filter(t => !h.acks.has(t)).map(t => t.slice(0, 6));
+    if (slice <= 0) {                     // 触及硬上限：客户端连着却始终不回执（真卡死），强制推进避免夜晚永久挂起
+      console.warn('[night] 已达硬上限 ' + NIGHT_ACK_MAX_WAIT + 'ms 仍无回执，强制推进');
+      fire('max-wait', { missing: missing() });
+      return;
+    }
+    room.nightHoldTimer = setTimeout(() => {
+      room.nightHoldTimer = null;
+      if (room.nightHold !== h) return;                 // 已被回执/断线/重开消费掉，别重复推进
+      const waited2 = Date.now() - startedAt;
+      const stillOnline = room.sse.some(c => c.token && h.expected.has(c.token));
+      // ⚠️ 关键：客户端还连着但没回执 = 它还在朗读（Piper 长句 8~12s 很常见，如狼人睁眼台词）。
+      // 旧逻辑在这里 8s 就超时抢跑，服务端念到下一位而客户端还停在上一位 → 顺序错乱 + 停顿远大于 2000ms。
+      // 现在只要人还在，就一直续等（每次续等最多 NIGHT_ACK_TIMEOUT），直到收到 nightAck 或触及硬上限。
+      if (stillOnline && waited2 < NIGHT_ACK_MAX_WAIT) {
+        h.renewed++;
+        debugLog('night-hold-renew', { room: room.code, waitedMs: waited2, renewed: h.renewed, missing: missing() });
+        arm();
+        return;
+      }
+      console.warn('[night] 兜底推进（已等待 ' + waited2 + 'ms，stillOnline=' + stillOnline + '）');
+      fire('timeout', { waitedMs: waited2, stillOnline, missing: missing() });
+    }, slice);
+  };
+  arm();
 }
 // 某玩家断开连接：若正处于「等待全员确认」的夜晚节奏中，视为该玩家已确认（不再等它），
-// 避免其掉线导致整桌白等 NIGHT_ACK_TIMEOUT 秒。
+// 避免其掉线导致整桌白等。若这一走导致无人在线，则整晚暂停（等重连续跑），而不是让服务端空跑。
 function _dropNightAcker(room, token) {
   const h = room.nightHold;
-  if (!h || !h.expected || !h.expected.has(token)) return;
-  h.expected.delete(token);
-  h.acks.add(token);
-  if ([...h.expected].every(t => h.acks.has(t))) {
+  if (h && h.expected && h.expected.has(token)) {
+    h.expected.delete(token);
+    h.acks.add(token);
+    if (![...h.expected].every(t => h.acks.has(t))) return;
+    const cbk = h.cb;
     clearNightHold(room);
-    try { h.cb(); } catch (e) { console.error('[night] 断线推进异常:', e && e.stack || e); safeAdvance(room, 'disconnect'); }
+    if (_nightShouldPause(room)) { nightPause(room, cbk); return; }
+    try { cbk(); } catch (e) { console.error('[night] 断线推进异常:', e && e.stack || e); safeAdvance(room, 'disconnect'); }
+    return;
+  }
+  // 不在等待集合中（例如正处在「睁眼停留」或「闭眼 2000ms 停顿」的计时阶段）：
+  // 若这一走就没人在线了，同样把当前这一步挂起，别让服务端在无人观看时一路空跑到白天。
+  if (_nightShouldPause(room)) {
+    const resume = room.nightTimerResume || (() => pushState(room));
+    nightPause(room, resume);
   }
 }
 // 闭眼后的标准推进：先等客户端确认「闭眼」已念完（与语音同步），再维持 NIGHT_CLOSE_PAUSE 停顿，才进入下一位
@@ -348,7 +419,9 @@ function holdNightCloseThen(room, cb) {
   holdNightAck(room, () => {
     const startedAt = Date.now();
     debugLog('night-close-pause-start', { room: room.code, configuredMs: NIGHT_CLOSE_PAUSE });
+    room.nightTimerResume = cb;         // 全员掉线时挂起，重连后原地续跑（直接推进到下一位）
     room.nightTimer = setTimeout(() => {
+      room.nightTimerResume = null;
       debugLog('night-close-pause-elapsed', { room: room.code, waitedMs: Date.now() - startedAt });
       room.nightTimer = null; cb();
     }, NIGHT_CLOSE_PAUSE);
@@ -765,6 +838,7 @@ function setupStage(room, stage) {
 function advanceQueue(room) {
   clearNightHold(room);
   if (room.nightTimer) { clearTimeout(room.nightTimer); room.nightTimer = null; }
+  room.nightTimerResume = null;
   room.qIndex++;
   if (room.qIndex >= room.queue.length) {
     // 本阶段结束
@@ -798,7 +872,11 @@ function advanceQueue(room) {
     pushState(room);
     // 无输入角色（如爪牙确认狼人、守夜人确认同伴、失眠者确认身份）：睁眼后停留 NIGHT_REVEAL_PAUSE 让玩家看清/听完私有信息，再闭眼
     const delay = NIGHT_REVEAL_PAUSE;
-    room.nightTimer = setTimeout(() => closeAndAdvance(room, r), delay);
+    room.nightTimerResume = () => closeAndAdvance(room, r);   // 全员掉线时挂起，重连后原地续跑（继续闭眼下一位）
+    room.nightTimer = setTimeout(() => {
+      room.nightTimerResume = null;
+      room.nightTimer = null; closeAndAdvance(room, r);
+    }, delay);
   }
 }
 
@@ -1127,6 +1205,8 @@ function beginDay(room) {
   room.currentAction = null;
   room.nightActors = new Set();
   if (room.nightTimer) { clearTimeout(room.nightTimer); room.nightTimer = null; }
+  room.nightTimerResume = null;
+  room.nightPaused = null;
   clearNightHold(room);
   announce(room, '天亮了，请睁眼。现在是白天发言阶段，请大家依次发言。');
   publicLog(room, '天亮了，进入白天发言阶段。');
@@ -1406,6 +1486,8 @@ function restartGame(room) {
   room.privateInfo = {};
   room.queue = []; room.qIndex = -1;
   if (room.nightTimer) { clearTimeout(room.nightTimer); room.nightTimer = null; }
+  room.nightTimerResume = null;
+  room.nightPaused = null;
   clearNightHold(room);
   pushState(room);
 }
@@ -1532,6 +1614,8 @@ const server = http.createServer((req, res) => {
     // 立即推送当前状态
     res.write(`event: state\ndata: ${JSON.stringify(buildState(room, p))}\n\n`);
     debugLog('sse-state-pushed', { room: room.code, tag: token.slice(0, 6), phase: room.phase, annSeq: room.annSeq, annLogLen: room.annLog.length });
+    // 夜晚曾因「全员掉线」被暂停 → 有人重连就原地续跑，绝不跳过任何一步
+    if (room.nightPaused) nightResume(room);
     req.on('close', () => {
       room.sse = room.sse.filter(c => c !== client);
       const pp = findPlayer(room, token); if (pp) pp.connected = room.sse.some(c => c.token === token);
@@ -1704,6 +1788,13 @@ const server = http.createServer((req, res) => {
           // 保证多人同房时大家的播报节奏严格对齐（音文同步）。任一客户端重复回执无害：acks 为 Set 自动去重。
           if (room.nightHold) {
             const hold = room.nightHold;
+            // 回执必须对应「本条闭眼播报」。补发通道里客户端可能还在念断线期间漏掉的旧条目，
+            // 那条念完也会发一次回执——若不校验 seq，服务端会误以为本条已念完而抢跑，重新造成音文错位。
+            const ackSeq = (payload && typeof payload.seq === 'number') ? payload.seq : null;
+            if (ackSeq != null && hold.seq != null && ackSeq !== hold.seq) {
+              debugLog('night-ack-stale', { room: room.code, tag: token.slice(0, 6), ackSeq, holdSeq: hold.seq });
+              return sendJSON(res, { ok: true, stale: true });
+            }
             hold.acks.add(token);
             debugLog('night-ack-received', { room: room.code, tag: token.slice(0, 6), acked: hold.acks.size, expected: hold.expected.size });
             const allAcked = [...hold.expected].every(t => hold.acks.has(t));

@@ -1,11 +1,12 @@
 {
   "name": "one-night-werewolf-online",
   "version": "1.0.0",
-  "description": "一夜狼人杀 · 在线版（零依赖 Node.js + 浏览器内置语音；服务端内置 Piper TTS 为无引擎浏览器提供语音兜底）",
+  "description": "一夜狼人杀 · 在线版（零依赖 Node.js + 浏览器内置语音；服务端 TTS 双引擎：MeloTTS(sherpa-onnx) 优先，Piper 作零依赖回退）",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "install:tts": "node scripts/install_piper.js"
+    "start": "node scripts/ensure_tts.js && node server.js",
+    "install:tts": "node scripts/install_piper.js",
+    "install:melo": "node scripts/install_melo.js"
   },
   "engines": {
     "node": ">=16"
