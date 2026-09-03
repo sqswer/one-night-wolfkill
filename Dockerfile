@@ -17,5 +17,6 @@ COPY . .
 ENV PORT=3000
 EXPOSE 3000
 
-# 启动前由 ensure_tts.js 幂等确认 MeloTTS 就位（已装跳过、缺则联网装、失败不阻断），再起服务
+# 启动直接起服务（npm start = node server.js），不做任何联网下载；
+# MeloTTS 由 install:melo（有外网时）或手动放置 tts-bin/ 提供，缺失则自动回退 Piper。
 CMD ["npm", "start"]

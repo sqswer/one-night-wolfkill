@@ -4,9 +4,10 @@
   "description": "一夜狼人杀 · 在线版（零依赖 Node.js + 浏览器内置语音；服务端 TTS 双引擎：MeloTTS(sherpa-onnx) 优先，Piper 作零依赖回退）",
   "main": "server.js",
   "scripts": {
-    "start": "node scripts/ensure_tts.js && node server.js",
+    "start": "node server.js",
     "install:tts": "node scripts/install_piper.js",
-    "install:melo": "node scripts/install_melo.js"
+    "install:melo": "node scripts/install_melo.js",
+    "ensure:tts": "node scripts/ensure_tts.js"
   },
   "engines": {
     "node": ">=16"
