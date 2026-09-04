@@ -201,10 +201,11 @@ function connectSSE() {
   es.addEventListener('voice', (e) => { const d = JSON.parse(e.data); onVoiceState((d.seats) || []); });
   es.addEventListener('voice_invite', (e) => {
     const d = JSON.parse(e.data);
-    if (voiceOn) return;
+    if (voiceOn) { _debuglogPush('voice-invite-rcv-skip', { from: d.fromSeat, reason: 'already-in' }); return; }
     const key = d.fromSeat + ':' + (d.at || 0);
     if (key === voiceInviteShownKey) return;   // 同一条邀请只弹一次（防止每次 state 都弹）
     voiceInviteShownKey = key;
+    _debuglogPush('voice-invite-rcv', { from: d.fromSeat, at: d.at, fromName: d.fromName });
     showVoiceInvite(d.fromName);
   });
   es.addEventListener('signal', (e) => { const d = JSON.parse(e.data); onVoiceSignal(d.from, d.data); });
@@ -1585,6 +1586,9 @@ async function voiceLoadIce() {
     if (j && Array.isArray(j.iceServers) && j.iceServers.length) {
       ICE_SERVERS = j.iceServers;
       voiceIceLoaded = true;
+      const _stun = j.iceServers.filter(s => String(s.urls).includes('stun')).length;
+      const _turn = j.iceServers.filter(s => String(s.urls).includes('turn')).length;
+      _debuglogPush('voice-ice-loaded', { stun: _stun, turn: _turn, total: j.iceServers.length });
     }
   } catch (_) {}
 }
@@ -1605,21 +1609,31 @@ function voiceMakePeer(seat) {
   const peer = { pc, audio, pendingCandidates: [], watchdog: null, fadeTimer: null, ducked: false };
   // 本地音轨必须在建连时就加入，否则对端听不到本端（单向无声）
   if (localStream) localStream.getAudioTracks().forEach(t => pc.addTrack(t, localStream));
-  pc.onicecandidate = (e) => { if (e.candidate) voiceSend('signal', { to: seat, data: { candidate: e.candidate } }); };
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      const _c = e.candidate;
+      const _type = _c.type || ((_c.candidate || '').split(' ')[7]) || '?';
+      _debuglogPush('voice-ice-candidate', { seat, type: _type, protocol: _c.protocol || null });
+      voiceSend('signal', { to: seat, data: { candidate: _c } });
+    }
+  };
   pc.ontrack = (e) => {
     let stream = (e.streams && e.streams[0]) || null;
     if (!stream) { stream = new MediaStream(); stream.addTrack(e.track); } // 兜底：某些浏览器 streams 为空，用裸 track 组装
     audio.srcObject = stream;
     voiceFadeIn(peer);      // 淡入：避免建连瞬间满音量冲击造成的刺耳噪声
     voicePlayRemote(peer);  // 自动播放策略防护：被拦截时挂手势重试
+    _debuglogPush('voice-ontrack', { seat, hasStream: !!(e.streams && e.streams[0]), tracks: (e.streams && e.streams[0]) ? e.streams[0].getAudioTracks().length : (e.track ? 1 : 0) });
   };
   // 稳定性：ICE 失败时自动重启候选协商；连接彻底断开后尝试重连
   pc.oniceconnectionstatechange = () => {
+    _debuglogPush('voice-ice-state', { seat, state: pc.iceConnectionState });
     if (pc.iceConnectionState === 'failed') {
       try { pc.restartIce(); } catch (_) {}
     }
   };
   pc.onconnectionstatechange = () => {
+    _debuglogPush('voice-conn-state', { seat, state: pc.connectionState });
     if (pc.connectionState === 'connected') {
       try { clearTimeout(peer.watchdog); } catch (_) {}
       peer.watchdog = null;
@@ -1633,6 +1647,8 @@ function voiceMakePeer(seat) {
       }
     }
   };
+  const _init = (STATE.data && STATE.data.you) ? (STATE.data.you.seat < seat) : null;
+  _debuglogPush('voice-peer-made', { seat, initiator: _init, hasLocalStream: !!localStream, tracks: localStream ? localStream.getAudioTracks().length : 0 });
   return peer;
 }
 
@@ -1662,6 +1678,7 @@ function voicePlayRemote(peer) {
 function voiceMarkBlocked() {
   if (voiceAudioBlocked) return;
   voiceAudioBlocked = true;
+  _debuglogPush('voice-play-blocked', { peers: voicePeers.size });
   toast('🔊 浏览器拦截了语音播放，点击屏幕任意位置即可听到队友');
   const retry = () => {
     document.removeEventListener('click', retry);
@@ -1680,10 +1697,12 @@ async function voiceInitiate(seat) {
   const peer = voiceMakePeer(seat);
   if (!peer) { toast('当前浏览器不支持 WebRTC 实时语音'); return; }
   voicePeers.set(seat, peer);
+  _debuglogPush('voice-initiate', { seat });
   try {
     const offer = await peer.pc.createOffer();
     await peer.pc.setLocalDescription(offer);
     voiceSend('signal', { to: seat, data: { desc: peer.pc.localDescription } });
+    _debuglogPush('voice-offer-sent', { seat });
   } catch (_) { voiceClosePeer(seat); return; }
   // 连接看门狗：超时仍未连上就重建，解决"有时连得上有时连不上"（NAT/ICE 抖动）
   peer.watchdog = setTimeout(() => voiceWatchdogFire(seat), VOICE_CONNECT_TIMEOUT);
@@ -1693,6 +1712,7 @@ function voiceWatchdogFire(seat) {
   if (!peer || !voiceOn) return;
   if (peer.pc.connectionState === 'connected') { peer.watchdog = null; return; }
   const tries = (voiceRetries.get(seat) || 0) + 1;
+  _debuglogPush('voice-watchdog', { seat, tries, state: peer.pc.connectionState, iceState: peer.pc.iceConnectionState });
   if (tries > VOICE_MAX_RETRY) {
     voiceRetries.delete(seat);
     voiceClosePeer(seat);
@@ -1709,28 +1729,31 @@ async function onVoiceSignal(from, data) {
   let peer = voicePeers.get(from);
   if (data.desc) {
     if (!peer) {
-      if (data.desc.type !== 'offer') return; // 无连接时的 answer 忽略
+      if (data.desc.type !== 'offer') { _debuglogPush('voice-signal-drop', { from, reason: 'answer-without-peer' }); return; } // 无连接时的 answer 忽略
       // 本地麦克风尚未就绪（getUserMedia 进行中）：暂存 offer，待就绪后处理，
       // 避免创建“无音轨”的 peer 导致对端收不到本端声音（单向无声）。
-      if (!localStream) { voicePendingOffers.push({ from, data }); return; }
+      if (!localStream) { voicePendingOffers.push({ from, data }); _debuglogPush('voice-signal-defer', { from, type: data.desc.type }); return; }
       peer = voiceMakePeer(from);
       if (!peer) return;
       voicePeers.set(from, peer);
+      _debuglogPush('voice-peer-made-remote', { from, type: data.desc.type });
     }
     try {
       await peer.pc.setRemoteDescription(data.desc);
+      _debuglogPush('voice-remote-desc', { from, type: data.desc.type });
       if (data.desc.type === 'offer') {
         const ans = await peer.pc.createAnswer();
         await peer.pc.setLocalDescription(ans);
         voiceSend('signal', { to: from, data: { desc: peer.pc.localDescription } });
+        _debuglogPush('voice-answer-sent', { from });
       }
       for (const c of peer.pendingCandidates) { try { await peer.pc.addIceCandidate(c); } catch (_) {} }
       peer.pendingCandidates = [];
-    } catch (_) {}
+    } catch (_) { _debuglogPush('voice-signal-err', { from, type: data.desc.type }); }
   } else if (data.candidate) {
-    if (!peer) return;
-    if (peer.pc.remoteDescription) { try { await peer.pc.addIceCandidate(data.candidate); } catch (_) {} }
-    else peer.pendingCandidates.push(data.candidate);
+    if (!peer) { _debuglogPush('voice-candidate-drop', { from, reason: 'no-peer' }); return; }
+    if (peer.pc.remoteDescription) { try { await peer.pc.addIceCandidate(data.candidate); _debuglogPush('voice-candidate-add', { from }); } catch (_) { _debuglogPush('voice-candidate-err', { from }); } }
+    else { peer.pendingCandidates.push(data.candidate); _debuglogPush('voice-candidate-pending', { from }); }
   }
 }
 function flushVoicePendingOffers() {

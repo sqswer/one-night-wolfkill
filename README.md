@@ -98,18 +98,18 @@ node test_flow.js M6        # 猎人阵容
 ## 部署（Bonto / 容器）
 
 - 基础镜像必须是 **glibc**（`node:20-bookworm-slim`）：sherpa-onnx 的 linux 二进制是 glibc 的，alpine(musl) 跑不起来。
-- `npm start` = `node server.js`。`npm start` 的 **prestart** 会先跑 `scripts/ensure-tts-onstart.js`：MeloTTS 已就绪则秒过不联网；缺失则自动用 ghproxy 镜像拉取（幂等，首次约 190MB），拉不到仅告警并降级 Piper 启动。**Bonto 每次重建/唤醒容器都会自愈**，无需手动重跑。本地有 `tts-bin/` 时同样直接跳过。
+- `npm start` = `node server.js`。`npm start` 的 **prestart** 会先跑 `scripts/ensure-tts-onstart.js`，行为由环境变量决定：
+  - **默认（Bonto 免费档）**：**不下载 MeloTTS**。Bonto 免费档存储上限 256MB，装不下任何服务端 TTS 引擎（melo 约 190MB、piper 约 100MB），强制下载会撑爆存储导致 push/pull 被拒。故 Bonto 仅用 Piper / 纯文字播报。
+  - **`INSTALL_MELO_ON_START=1`（Zeabur 等空间充足的平台）**：自动用 ghproxy 镜像拉取 MeloTTS（幂等，首次约 190MB），拉不到仅告警并降级 Piper 启动。迁移到 Zeabur 时设此变量即可自动装 melo。
+  - 本地有 `tts-bin/` 时直接跳过；本地想装 melo：`npm run install:melo`。
 - 同步：Bonto 配置 Git 仓库，点 **pull from remote** 同步重启。沙箱无法 push，本地 `git push origin main` 后去 Bonto 点一下即可。
 
-### TTS 引擎在 Bonto 上的持久化
+### TTS 引擎持久化 / 各平台取舍
 
 `tts-bin/`（MeloTTS 约 160MB + Piper）**被 `.gitignore` 排除、不在镜像内**，且 **Bonto 没有持久卷配置**：它的持久化模型就是 git 工作目录，每次 `pull from remote` / 重建容器会按 git 快照重置文件系统，未跟踪的 `tts-bin/` 因此被清掉（实测 room=692620 那局 melo 丢失回退 Piper）。同时 GitHub 单文件 100MB 硬上限会拒掉 `model.onnx`（约 150MB），**「提交进 Git」也走不通**。
 
-采用**启动自检+按需下载**（已落地）：
-- `package.json` 的 `prestart` 跑 `scripts/ensure-tts-onstart.js`：检测 `tts-bin/sherpa-onnx-offline-tts` 与 `vits-melo-tts-zh_en/model.onnx`，缺失就调 `install_melo.js` 经 ghproxy 镜像拉取（幂等），拉不到仅告警并降级 Piper 启动（不阻断服务）。
-- 效果：Bonto 每次重建/从休眠唤醒都会自愈拉回引擎，无需手动干预，也不把 190MB 塞进 git、不碰 100MB 限制。
-- 本地有 `tts-bin/` 时直接跳过；本地想装：`npm run install:melo`。
-- 仍可用 `scripts/bonto-download-tts.sh`（幂等、支持 `TTS_BIN_DIR`）在终端手动装，或 `TTS_PROVIDER=piper` 临时回退。
+- **Bonto 现状**：免费档 256MB 养不起任何 TTS 引擎，故只保留 Piper（音质较差但够用），重点先测 WebRTC 语音通话；melo 切换留到迁移 Zeabur（2GB 档）时再做。
+- 手动安装仍可用 `scripts/bonto-download-tts.sh`（幂等、支持 `TTS_BIN_DIR` 自定义挂载路径），或 `TTS_PROVIDER=piper` 临时回退。
 
 ## 已知限制 / 后续可扩展
 

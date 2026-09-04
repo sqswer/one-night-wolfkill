@@ -1619,7 +1619,7 @@ const server = http.createServer((req, res) => {
     req.on('close', () => {
       room.sse = room.sse.filter(c => c !== client);
       const pp = findPlayer(room, token); if (pp) pp.connected = room.sse.some(c => c.token === token);
-      if (room.voice.has(token)) { room.voice.delete(token); broadcast(room, 'voice', { seats: voiceSeats(room) }); }
+      if (room.voice.has(token)) { room.voice.delete(token); broadcast(room, 'voice', { seats: voiceSeats(room) }); debugLog('voice-sse-close-clean', { room: room.code, tag: token.slice(0, 6) }); }
       _dropNightAcker(room, token);   // 掉线玩家不再等待其播报确认，避免整桌白等超时
       debugLog('sse-close', { room: room.code, tag: token.slice(0, 6), remaining: room.sse.length, phase: room.phase });
     });
@@ -1647,7 +1647,12 @@ const server = http.createServer((req, res) => {
 
   // 客户端建连前拉取 ICE 配置（默认 STUN；配了 TURN_URL 环境变量则自动带上 TURN）
   if (req.method === 'GET' && pathname === '/api/ice') {
-    return sendJSON(res, iceConfig());
+    const _cfg = iceConfig();
+    const _servers = _cfg.iceServers || [];
+    const _stun = _servers.filter(s => String(s.urls).includes('stun')).length;
+    const _turn = _servers.filter(s => String(s.urls).includes('turn')).length;
+    debugLog('voice-ice', { stun: _stun, turn: _turn, total: _servers.length });
+    return sendJSON(res, _cfg);
   }
 
   if (req.method === 'GET' && pathname === '/api/tts') {
@@ -1817,24 +1822,41 @@ const server = http.createServer((req, res) => {
           clearVoiceInvite(room, token);          // 已加入 → 邀请失效
           voiceBroadcast(room);
           pushState(room);                        // 同步 state.voiceSeats / voiceInvite，避免状态陈旧
+          debugLog('voice-join', { room: room.code, seat: p.seat, name: p.name, voiceSeats: voiceSeats(room), invited: voiceInvitedSeats(room) });
         }
-        else if (sub === 'leave') { room.voice.delete(token); voiceBroadcast(room); pushState(room); }
+        else if (sub === 'leave') {
+          room.voice.delete(token); voiceBroadcast(room); pushState(room);
+          debugLog('voice-leave', { room: room.code, seat: p.seat, name: p.name, voiceSeats: voiceSeats(room) });
+        }
         else if (sub === 'invite') {
           // 发起者邀请房间内其他玩家加入语音通话。
           // 双通道投递：①立即推 voice_invite 事件（低延迟）；②写入房间持久状态并 pushState，
           // 这样目标客户端当时若正在重连/切后台，之后收到任意 state 仍能发现待处理邀请
           // ——修复「有时能收到通话请求，有时收不到」。
+          const _targets = [];
           for (const other of room.players) {
             if (other.token === token || other.bot) continue;   // 不邀请自己 / 机器人
             if (room.voice.has(other.token)) continue;          // 已在通话中
             const at = Date.now();
             room.voiceInvites[other.token] = { fromSeat: p.seat, fromName: p.name, at };
             pushTo(room, other.token, 'voice_invite', { fromSeat: p.seat, fromName: p.name, at });
+            _targets.push(other.seat);
           }
           pushState(room);
+          debugLog('voice-invite', { room: room.code, from: p.seat, fromName: p.name, targets: _targets, total: room.players.length });
         }
-        else if (sub === 'decline') { clearVoiceInvite(room, token); pushState(room); }
-        else if (sub === 'signal') { const to = seatToToken(room, payload.to); if (to && to !== token) pushTo(room, to, 'signal', { from: p.seat, data: payload.data }); }
+        else if (sub === 'decline') {
+          clearVoiceInvite(room, token); pushState(room);
+          debugLog('voice-decline', { room: room.code, seat: p.seat });
+        }
+        else if (sub === 'signal') {
+          const to = seatToToken(room, payload.to);
+          if (to && to !== token) {
+            const _dt = payload.data && payload.data.desc ? payload.data.desc.type : (payload.data && payload.data.candidate ? 'candidate' : 'unknown');
+            pushTo(room, to, 'signal', { from: p.seat, data: payload.data });
+            debugLog('voice-signal', { room: room.code, from: p.seat, to: payload.to, type: _dt });
+          }
+        }
         break;
       }
         default: return sendJSON(res, { error: 'unknown action' }, 400);
