@@ -57,7 +57,7 @@ function sherpaAsset() {
 // 顺序即回退顺序，任一可用即止。
 function withProxy(u) {
   const bare = u.replace(/^https:\/\//, '');
-  return [u, 'https://ghproxy.net/' + bare, 'https://mirror.ghproxy.com/' + bare];
+  return [u, 'https://ghproxy.net/' + bare, 'https://gh.api.99988866.xyz/' + bare];
 }
 function sherpaUrls() { return withProxy(`${GH}/v${SHERPA_VER}/${sherpaAsset()}`); }
 function modelUrls() { return withProxy(MODEL_URL); }

@@ -79,7 +79,7 @@ public/index.html    # 页面骨架（首页/大厅/游戏/角色图鉴弹窗）
 public/styles.css    # 手机优先样式
 public/roles.js      # 角色图鉴数据源（ROLE_LIB，33 角色结构化信息）
 public/client.js     # 状态同步、AI 播报员、行动UI、语音、投票、结果、角色图鉴渲染
-Dockerfile           # 容器镜像（node:20-alpine）
+Dockerfile           # 容器镜像（node:20-bookworm-slim，glibc，sherpa 必需）
 官方规则审计报告.md   # 基于官方规则书的角色库/流程/胜负审计结论（本地文档，不推送远程）
 test_flow.js         # 无头端到端测试（3 人自动走完一局，校验结果）
 test_bot.js          # 单人 + 机器人 全流程联调（建房→加满机器人→夜晚/投票→结算）
@@ -94,6 +94,22 @@ node test_flow.js            # 默认 M1 阵容
 node test_flow.js V1        # 吸血鬼(黄昏)阵容
 node test_flow.js M6        # 猎人阵容
 ```
+
+## 部署（Bonto / 容器）
+
+- 基础镜像必须是 **glibc**（`node:20-bookworm-slim`）：sherpa-onnx 的 linux 二进制是 glibc 的，alpine(musl) 跑不起来。
+- `npm start` = `node server.js`。`npm start` 的 **prestart** 会先跑 `scripts/ensure-tts-onstart.js`：MeloTTS 已就绪则秒过不联网；缺失则自动用 ghproxy 镜像拉取（幂等，首次约 190MB），拉不到仅告警并降级 Piper 启动。**Bonto 每次重建/唤醒容器都会自愈**，无需手动重跑。本地有 `tts-bin/` 时同样直接跳过。
+- 同步：Bonto 配置 Git 仓库，点 **pull from remote** 同步重启。沙箱无法 push，本地 `git push origin main` 后去 Bonto 点一下即可。
+
+### TTS 引擎在 Bonto 上的持久化
+
+`tts-bin/`（MeloTTS 约 160MB + Piper）**被 `.gitignore` 排除、不在镜像内**，且 **Bonto 没有持久卷配置**：它的持久化模型就是 git 工作目录，每次 `pull from remote` / 重建容器会按 git 快照重置文件系统，未跟踪的 `tts-bin/` 因此被清掉（实测 room=692620 那局 melo 丢失回退 Piper）。同时 GitHub 单文件 100MB 硬上限会拒掉 `model.onnx`（约 150MB），**「提交进 Git」也走不通**。
+
+采用**启动自检+按需下载**（已落地）：
+- `package.json` 的 `prestart` 跑 `scripts/ensure-tts-onstart.js`：检测 `tts-bin/sherpa-onnx-offline-tts` 与 `vits-melo-tts-zh_en/model.onnx`，缺失就调 `install_melo.js` 经 ghproxy 镜像拉取（幂等），拉不到仅告警并降级 Piper 启动（不阻断服务）。
+- 效果：Bonto 每次重建/从休眠唤醒都会自愈拉回引擎，无需手动干预，也不把 190MB 塞进 git、不碰 100MB 限制。
+- 本地有 `tts-bin/` 时直接跳过；本地想装：`npm run install:melo`。
+- 仍可用 `scripts/bonto-download-tts.sh`（幂等、支持 `TTS_BIN_DIR`）在终端手动装，或 `TTS_PROVIDER=piper` 临时回退。
 
 ## 已知限制 / 后续可扩展
 

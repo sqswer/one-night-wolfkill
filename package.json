@@ -5,6 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "prestart": "node scripts/ensure-tts-onstart.js",
     "install:tts": "node scripts/install_piper.js",
     "install:melo": "node scripts/install_melo.js",
     "ensure:tts": "node scripts/ensure_tts.js"
